@@ -47,20 +47,24 @@ class AdapterRegistry:
 
     def auto_register_builtin(self) -> None:
         """Register all built-in adapter classes."""
-        from src.integrations.firewall_adapter import PaloAltoAdapter, FortinetAdapter
-        from src.integrations.waf_adapter import CloudflareWAFAdapter, AWSWAFAdapter
-        from src.integrations.siem_adapter import WazuhAdapter, SplunkAdapter
-        from src.integrations.identity_adapter import EntraIDAdapter, OktaAdapter
-        from src.integrations.edr_adapter import CrowdStrikeAdapter, SentinelOneAdapter
-        from src.integrations.soar_adapter import ShuffleAdapter, TracecatAdapter
+        from src.integrations.firewall_adapter import PaloAltoAdapter
+        from src.integrations.siem_adapter import QRadarAdapter
+        from src.integrations.identity_adapter import EntraIDAdapter
+        from src.integrations.edr_adapter import DefenderXDRAdapter
+        from src.integrations.microsoft_adapter import (
+            ExchangeOnlineAdapter,
+            TeamsAdapter,
+            SecurityCenterAdapter,
+        )
 
         for cls in [
-            PaloAltoAdapter, FortinetAdapter,
-            CloudflareWAFAdapter, AWSWAFAdapter,
-            WazuhAdapter, SplunkAdapter,
-            EntraIDAdapter, OktaAdapter,
-            CrowdStrikeAdapter, SentinelOneAdapter,
-            ShuffleAdapter, TracecatAdapter,
+            PaloAltoAdapter,
+            QRadarAdapter,
+            EntraIDAdapter,
+            DefenderXDRAdapter,
+            ExchangeOnlineAdapter,
+            TeamsAdapter,
+            SecurityCenterAdapter,
         ]:
             self.register_class(cls.vendor, cls)
 

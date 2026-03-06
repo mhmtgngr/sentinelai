@@ -3,7 +3,7 @@
 import pytest
 from src.integrations.base_adapter import BaseSecurityAdapter, HealthStatus, SecurityEvent
 from src.integrations.adapter_registry import AdapterRegistry
-from src.integrations.firewall_adapter import PaloAltoAdapter, FortinetAdapter
+from src.integrations.firewall_adapter import PaloAltoAdapter
 
 
 class MockAdapter(BaseSecurityAdapter):
@@ -84,8 +84,64 @@ def test_auto_register_builtin():
     registry.auto_register_builtin()
     listed_classes = list(registry._adapter_classes.keys())
     assert "paloalto" in listed_classes
-    assert "wazuh" in listed_classes
-    assert "crowdstrike" in listed_classes
-    assert "cloudflare" in listed_classes
+    assert "qradar" in listed_classes
     assert "entra_id" in listed_classes
-    assert "shuffle" in listed_classes
+    assert "defender_xdr" in listed_classes
+    assert "exchange_online" in listed_classes
+    assert "teams" in listed_classes
+    assert "security_center" in listed_classes
+
+
+def test_qradar_magnitude_mapping():
+    from src.integrations.siem_adapter import QRadarAdapter
+    assert QRadarAdapter._map_magnitude(9) == "critical"
+    assert QRadarAdapter._map_magnitude(7) == "high"
+    assert QRadarAdapter._map_magnitude(5) == "medium"
+    assert QRadarAdapter._map_magnitude(3) == "low"
+    assert QRadarAdapter._map_magnitude(1) == "info"
+
+
+def test_qradar_tactic_inference():
+    from src.integrations.siem_adapter import QRadarAdapter
+    assert QRadarAdapter._infer_tactic(["Recon", "Port Scan"]) == "Reconnaissance"
+    assert QRadarAdapter._infer_tactic(["Exploit", "Buffer Overflow"]) == "Initial Access"
+    assert QRadarAdapter._infer_tactic(["Malware", "Trojan"]) == "Execution"
+    assert QRadarAdapter._infer_tactic(["Lateral Movement"]) == "Lateral Movement"
+    assert QRadarAdapter._infer_tactic(["Exfiltration"]) == "Exfiltration"
+    assert QRadarAdapter._infer_tactic(["Unknown"]) == ""
+
+
+def test_defender_xdr_adapter_init():
+    from src.integrations.edr_adapter import DefenderXDRAdapter
+    adapter = DefenderXDRAdapter({
+        "endpoint": "",
+        "tenant_id": "test-tenant",
+        "client_id": "test-client",
+    })
+    assert adapter.vendor == "defender_xdr"
+    assert adapter.product_type == "edr"
+
+
+def test_exchange_online_adapter_init():
+    from src.integrations.microsoft_adapter import ExchangeOnlineAdapter
+    adapter = ExchangeOnlineAdapter({"endpoint": ""})
+    assert adapter.vendor == "exchange_online"
+    assert adapter.product_type == "email_security"
+
+
+def test_teams_adapter_init():
+    from src.integrations.microsoft_adapter import TeamsAdapter
+    adapter = TeamsAdapter({
+        "endpoint": "",
+        "webhook_url": "https://webhook.example.com/test",
+    })
+    assert adapter.vendor == "teams"
+    assert adapter.product_type == "collaboration"
+    assert adapter._webhook_url == "https://webhook.example.com/test"
+
+
+def test_security_center_adapter_init():
+    from src.integrations.microsoft_adapter import SecurityCenterAdapter
+    adapter = SecurityCenterAdapter({"endpoint": ""})
+    assert adapter.vendor == "security_center"
+    assert adapter.product_type == "security_center"
