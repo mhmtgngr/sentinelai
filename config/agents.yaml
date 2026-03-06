@@ -1,0 +1,64 @@
+# Sentinel-AI Agent Configuration
+
+agents:
+  triage:
+    enabled: true
+    # Patterns to automatically mark as false positive
+    false_positive_patterns:
+      - "health check"
+      - "monitoring probe"
+      - "scheduled backup"
+    # Severity threshold for auto-escalation
+    escalation_threshold: 75
+
+  threat_hunter:
+    enabled: true
+    # How often to run proactive hunts (in heartbeats)
+    hunt_frequency: 5
+    # Enable/disable specific hunting hypotheses
+    enabled_hypotheses:
+      - TH001  # Unusual outbound connections
+      - TH002  # Credential dumping indicators
+      - TH003  # Living off the land binaries
+      - TH004  # DNS tunneling
+      - TH005  # Lateral movement patterns
+
+  incident_responder:
+    enabled: true
+    # Require human approval for critical actions
+    require_approval_for:
+      - isolate_host
+      - disable_user
+      - reset_credentials
+    # Auto-approve low-risk actions
+    auto_approve_severity: ["low", "medium"]
+
+  compliance_auditor:
+    enabled: true
+    # Frameworks to audit
+    frameworks:
+      - CIS
+      - SOC2
+      - GDPR
+      - PCI-DSS
+    # Audit frequency (in heartbeats)
+    audit_frequency: 60
+
+  forensic_analyst:
+    enabled: true
+    # Maximum concurrent investigations
+    max_concurrent_cases: 10
+
+  vuln_scanner:
+    enabled: true
+    # Scan frequency (in heartbeats)
+    scan_frequency: 30
+    # Vulnerability check categories
+    enabled_checks:
+      - VS-001  # Outdated SSL/TLS
+      - VS-002  # Default credentials
+      - VS-003  # Open management ports
+      - VS-004  # Missing patches
+      - VS-005  # Weak authentication
+      - VS-006  # Misconfigured CORS
+      - VS-007  # Exposed sensitive endpoints

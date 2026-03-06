@@ -1,0 +1,42 @@
+# Playbook: Block Malicious IP
+name: block_malicious_ip
+description: Automatically blocks a malicious IP across all firewall and WAF adapters
+trigger:
+  event_type: threat.detected
+  conditions:
+    severity:
+      - high
+      - critical
+    attack_type:
+      - brute_force
+      - malware_c2
+      - data_exfiltration
+
+steps:
+  - name: Enrich IP with threat intel
+    action: threat_intel_enrich
+    params:
+      indicator_type: ip
+      indicator_field: source_ip
+
+  - name: Block on firewalls
+    action: block_ip
+    adapter_type: firewall
+    params:
+      ip_field: source_ip
+      duration: 86400  # 24 hours
+      reason: "Blocked by Sentinel-AI: {{ attack_type }}"
+
+  - name: Block on WAFs
+    action: block_ip
+    adapter_type: waf
+    params:
+      ip_field: source_ip
+      reason: "Blocked by Sentinel-AI: {{ attack_type }}"
+
+  - name: Notify SOC team
+    action: notify
+    params:
+      channel: slack
+      message: "Blocked malicious IP {{ source_ip }} - {{ attack_type }} detected"
+      severity: "{{ severity }}"

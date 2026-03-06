@@ -1,0 +1,26 @@
+title: Potential Lateral Movement via Remote Services
+id: sentinel-lat-001
+status: stable
+level: high
+description: Detects potential lateral movement using remote service creation or PsExec-like tools
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_psexec:
+    process_name|contains:
+      - "psexec"
+      - "paexec"
+    command_line|contains:
+      - "\\\\"
+  selection_service:
+    event_type: "service_creation"
+    service_type: "remote"
+  condition: selection_psexec or selection_service
+tags:
+  - attack.lateral_movement
+  - attack.t1021
+  - attack.t1569.002
+falsepositives:
+  - Legitimate remote administration
+  - SCCM deployments

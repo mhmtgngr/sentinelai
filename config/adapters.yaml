@@ -1,0 +1,76 @@
+# Sentinel-AI Adapter Configuration
+# Configure your security product integrations here.
+
+adapters:
+  # --- Firewalls ---
+  # - vendor: paloalto
+  #   name: primary_firewall
+  #   endpoint: https://fw.corp.local/api
+  #   api_key_env: PALOALTO_API_KEY
+  #   verify_ssl: true
+
+  # - vendor: fortinet
+  #   name: branch_firewall
+  #   endpoint: https://fg.branch.local/api
+  #   api_key_env: FORTINET_API_KEY
+
+  # --- WAFs ---
+  # - vendor: cloudflare
+  #   name: cloudflare_waf
+  #   zone_id: YOUR_ZONE_ID
+  #   api_token_env: CLOUDFLARE_API_TOKEN
+
+  # - vendor: aws_waf
+  #   name: aws_waf
+  #   region: us-east-1
+  #   web_acl_id: YOUR_WEB_ACL_ID
+  #   access_key_env: AWS_WAF_ACCESS_KEY
+  #   secret_key_env: AWS_WAF_SECRET_KEY
+
+  # --- SIEMs ---
+  # - vendor: wazuh
+  #   name: wazuh_siem
+  #   endpoint: https://wazuh.corp.local:55000
+  #   api_user_env: WAZUH_API_USER
+  #   api_password_env: WAZUH_API_PASSWORD
+  #   verify_ssl: false
+
+  # - vendor: splunk
+  #   name: splunk_siem
+  #   endpoint: https://splunk.corp.local:8089
+  #   hec_token_env: SPLUNK_HEC_TOKEN
+
+  # --- Identity Providers ---
+  # - vendor: entra_id
+  #   name: azure_ad
+  #   tenant_id_env: ENTRA_TENANT_ID
+  #   client_id_env: ENTRA_CLIENT_ID
+  #   client_secret_env: ENTRA_CLIENT_SECRET
+
+  # - vendor: okta
+  #   name: okta_idp
+  #   endpoint: https://your-org.okta.com
+  #   api_token_env: OKTA_API_TOKEN
+
+  # --- EDR ---
+  # - vendor: crowdstrike
+  #   name: crowdstrike_edr
+  #   endpoint: https://api.crowdstrike.com
+  #   client_id_env: CROWDSTRIKE_CLIENT_ID
+  #   client_secret_env: CROWDSTRIKE_CLIENT_SECRET
+
+  # - vendor: sentinelone
+  #   name: s1_edr
+  #   endpoint: https://your-tenant.sentinelone.net
+  #   api_token_env: SENTINELONE_API_TOKEN
+
+  # --- SOAR ---
+  # - vendor: shuffle
+  #   name: shuffle_soar
+  #   endpoint: https://shuffle.corp.local
+  #   api_key_env: SHUFFLE_API_KEY
+
+  # - vendor: tracecat
+  #   name: tracecat_soar
+  #   endpoint: http://localhost:8000
+  #   api_key_env: TRACECAT_API_KEY

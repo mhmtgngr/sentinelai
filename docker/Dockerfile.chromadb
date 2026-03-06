@@ -1,0 +1,6 @@
+FROM chromadb/chroma:latest
+
+EXPOSE 8000
+
+ENV ANONYMIZED_TELEMETRY=false
+ENV ALLOW_RESET=true
