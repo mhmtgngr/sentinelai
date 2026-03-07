@@ -42,6 +42,7 @@ class TriageAgent(BaseAgent):
         super().__init__(event_bus, config)
         self._alert_cache: dict[str, dict[str, Any]] = {}
         self._false_positive_patterns: list[str] = []
+        self.ai_analyzer: Any | None = None  # Injected by brain for AI enrichment
 
     async def initialize(self) -> None:
         await super().initialize()
@@ -88,6 +89,14 @@ class TriageAgent(BaseAgent):
             "mitre_tactics": mitre_tactics,
             "triaged_by": self.name,
         }
+
+        # AI enrichment for high-severity alerts
+        if self.ai_analyzer and severity_score >= 75:
+            try:
+                analysis = await self.ai_analyzer.analyze_alert(alert_data)
+                enriched["ai_analysis"] = analysis.to_dict()
+            except Exception:
+                logger.debug("AI enrichment unavailable, continuing without it")
 
         self._alert_cache[alert_key] = enriched
 

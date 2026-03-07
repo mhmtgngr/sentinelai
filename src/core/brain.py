@@ -12,10 +12,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from src.core.ai_analyzer import AIAnalyzer
 from src.core.asset_inventory import AssetInventory
 from src.core.autonomous import AutonomousDecisionEngine, DecisionOutcome
 from src.core.config import SentinelConfig
 from src.core.event_bus import Event, EventBus, EventType
+from src.core.notification_manager import NotificationManager
 from src.core.playbook_engine import PlaybookEngine
 from src.core.plugin_manager import PluginManager
 from src.core.self_learning import SelfLearningSystem
@@ -66,6 +68,12 @@ class SentinelBrain:
 
         # Plugin manager for extensibility
         self.plugin_manager = PluginManager(event_bus)
+
+        # AI analyzer for LLM-powered alert enrichment
+        self.ai_analyzer = AIAnalyzer(config.llm)
+
+        # Notification manager for multi-channel alerting
+        self.notification_manager = NotificationManager(event_bus)
 
         # Track cycle metrics
         self._cycle_count = 0
@@ -196,6 +204,15 @@ class SentinelBrain:
         if purple and red:
             purple.set_red_team(red)
 
+        # Initialize notification manager
+        self.notification_manager.load_config()
+        self.notification_manager.subscribe_events()
+
+        # Inject AI analyzer into triage agent for enrichment
+        triage = self._agents.get("triage")
+        if triage:
+            triage.ai_analyzer = self.ai_analyzer
+
         # Subscribe to events
         self.event_bus.subscribe(EventType.ALERT_RECEIVED, self._handle_alert)
         self.event_bus.subscribe(EventType.THREAT_DETECTED, self._handle_threat)
@@ -323,13 +340,25 @@ class SentinelBrain:
             recommendations = self.learning.get_recommended_actions(attack_type, severity)
             confidence = recommendations[0]["confidence"] if recommendations else 0.6
 
+            # AI-powered alert enrichment
+            ai_analysis = None
+            try:
+                analysis = await self.ai_analyzer.analyze_alert(event.data)
+                ai_analysis = analysis.to_dict()
+            except Exception:
+                logger.debug("AI analysis unavailable, continuing without enrichment")
+
+            threat_data = {
+                **result.data,
+                "learned_confidence": confidence,
+                "recommendations": recommendations[:3],
+            }
+            if ai_analysis:
+                threat_data["ai_analysis"] = ai_analysis
+
             await self.event_bus.publish(Event(
                 event_type=EventType.THREAT_DETECTED,
-                data={
-                    **result.data,
-                    "learned_confidence": confidence,
-                    "recommendations": recommendations[:3],
-                },
+                data=threat_data,
                 source="brain",
             ))
 
@@ -460,5 +489,9 @@ class SentinelBrain:
 
         # Plugin stats
         status["plugins"] = self.plugin_manager.get_stats()
+
+        # AI analyzer and notification stats
+        status["ai_analyzer"] = self.ai_analyzer.get_stats()
+        status["notifications"] = self.notification_manager.get_stats()
 
         return status

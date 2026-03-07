@@ -1,0 +1,37 @@
+# Sentinel-AI Notification Configuration
+#
+# Routes alerts to multiple channels based on severity level.
+# Set environment variables for webhook URLs (never put secrets in this file).
+
+notifications:
+  channels:
+    # Microsoft Teams — Adaptive Cards via incoming webhook
+    teams_webhook:
+      enabled: true
+      url_env: TEAMS_WEBHOOK_URL      # Set this env var with your webhook URL
+      min_severity: high               # Only HIGH and CRITICAL alerts
+
+    # WebSocket — Real-time push to connected dashboard clients
+    websocket:
+      enabled: true
+      min_severity: low                # All alerts pushed to dashboard
+
+    # Console — Structured log output (always available, no config needed)
+    console:
+      enabled: true
+      min_severity: low                # Log everything
+
+    # Generic Webhook — POST JSON to any URL (Slack, PagerDuty, Opsgenie, etc.)
+    # Set WEBHOOK_URL env var to your service's incoming webhook endpoint.
+    # For Slack: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+    # For PagerDuty: https://events.pagerduty.com/v2/enqueue
+    generic_webhook:
+      enabled: false
+      url_env: WEBHOOK_URL
+      min_severity: critical
+      headers:
+        Content-Type: application/json
+
+  # Throttle — prevent alert storms
+  throttle:
+    max_per_channel_per_minute: 10
