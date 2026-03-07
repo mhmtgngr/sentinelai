@@ -724,6 +724,122 @@ Sentinel-AI monitors itself through a separate alerting channel (not mixed with 
 
 ---
 
+## Testing Strategy
+
+### Test Pyramid
+
+| Layer | Scope | Tools | Run Frequency |
+|-------|-------|-------|---------------|
+| **Unit** | Individual agents, adapters, models, event bus | pytest, pytest-asyncio, unittest.mock | Every commit |
+| **Integration** | End-to-end pipeline (alert -> triage -> response) | pytest, test fixtures, Docker test containers | Every PR |
+| **Contract** | Adapter interface compliance | pytest, abstract test classes | Every commit |
+| **Resilience** | Failure injection (adapter down, LLM timeout, DB unavailable) | pytest, toxiproxy, custom fault injectors | Weekly / pre-release |
+| **Security** | Prompt injection payloads, action validation bypass, auth bypass | pytest, custom security fixtures | Every PR |
+
+### Unit Test Strategy
+
+Each component is tested in isolation with mocked dependencies:
+- **Agents**: Mock LLM responses and adapter calls; verify `AgentDecision` output structure, confidence scoring, and MITRE ATT&CK mapping
+- **Adapters**: Mock HTTP responses from vendor APIs; verify `SecurityEvent` normalization and `ActionResult` construction
+- **Event Bus**: Verify topic-based pub/sub, ordering guarantees, and backpressure behavior
+- **Models**: Pydantic validation — reject malformed events, enforce enum constraints, verify serialization round-trips
+- **Memory**: Mock ChromaDB client; verify embedding storage, similarity search, and feedback loop integration
+
+### Integration Test Fixtures
+
+Pre-built test scenarios representing realistic security events:
+- `brute_force_ssh.json` — Wazuh alert for SSH brute force → full reactive pipeline
+- `lateral_movement.json` — EDR detection of lateral movement → multi-agent investigation
+- `compliance_drift.json` — Firewall rule change violating policy → compliance audit
+- `false_positive_benign.json` — Benign activity that resembles an attack → verify correct classification
+
+### Security Testing
+
+- **Prompt injection corpus**: Test fixtures containing known prompt injection patterns embedded in log fields (`user-agent`, `hostname`, `command` fields) — verify sanitization strips them before LLM processing
+- **Action validation bypass**: Attempt to create `AgentDecision` objects with out-of-range confidence scores, invalid action types, or targets on the allowlist — verify the action validation layer rejects them
+- **Authentication tests**: Verify unauthorized API requests are rejected; verify RBAC role boundaries
+
+### Test Tooling
+
+```toml
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "factory-boy>=3.3",       # Test fixture factories
+    "respx>=0.21",            # httpx mock for async HTTP
+    "freezegun>=1.4",         # Time manipulation for timeout tests
+]
+```
+
+---
+
+## CI/CD Pipeline
+
+### Pre-commit Hooks
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    hooks:
+      - id: ruff          # Lint
+      - id: ruff-format   # Format
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    hooks:
+      - id: mypy          # Type checking
+  - repo: https://github.com/Yelp/detect-secrets
+    hooks:
+      - id: detect-secrets # Prevent credential leaks
+```
+
+### CI (GitHub Actions)
+
+| Step | Trigger | Purpose |
+|------|---------|---------|
+| **Lint & Format** | Every push | ruff check, ruff format --check |
+| **Type Check** | Every push | mypy --strict on src/ |
+| **Unit Tests** | Every push | pytest tests/ -m "not integration" |
+| **Integration Tests** | PR to main | pytest tests/ -m integration (with Docker services) |
+| **Security Scan** | PR to main | bandit (SAST), pip-audit (dependency vulnerabilities) |
+| **Docker Build** | PR to main | Verify `docker compose build` succeeds |
+| **Coverage Gate** | PR to main | Fail if coverage drops below 80% |
+
+### CD (Deployment)
+
+- **Staging**: Auto-deploy on merge to `main` — `docker compose up -d` on staging server
+- **Production**: Manual promotion via tagged release — Docker images pushed to registry on `v*` tags
+- **Rollback**: Previous Docker image tag always available; rollback is `docker compose pull && docker compose up -d` with previous tag
+
+### Branch Protection
+
+- `main` branch: Require passing CI + 1 code review + no direct pushes
+- All feature branches: Must be up-to-date with `main` before merge
+
+---
+
+## Data Model Versioning
+
+### Schema Evolution
+
+Data models (`SecurityEvent`, `Alert`, `Incident`, etc.) will evolve as integrations and agents mature. Strategy:
+
+| Store | Versioning Approach |
+|-------|-------------------|
+| **PostgreSQL** | Alembic migrations — each schema change gets a numbered migration with up/down |
+| **ChromaDB** | Versioned collection names (e.g., `alerts_v2`) with migration script to re-embed existing data |
+| **Event Bus** | Events carry a `schema_version` field; consumers handle N and N-1 versions |
+
+### Backward Compatibility
+
+- New fields are always **optional with defaults** — old events remain readable
+- Removed fields are **deprecated for 2 versions** before deletion
+- Breaking changes require a new collection/table + migration script
+- All migrations are tested in CI with fixture data from previous versions
+
+---
+
 ## Scalability Roadmap
 
 ### Phase 1: Single Instance (Current Design)
