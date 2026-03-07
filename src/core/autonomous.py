@@ -81,6 +81,8 @@ DESTRUCTIVE_ACTIONS = frozenset({
     "revoke_all_sessions",
     "quarantine_mailbox",
     "close_offense",
+    "simulate_attack",
+    "run_campaign",
 })
 
 # Actions safe to auto-execute
@@ -93,6 +95,10 @@ SAFE_ACTIONS = frozenset({
     "enrich_ioc",
     "add_to_watchlist",
     "log_event",
+    "build_coverage_matrix",
+    "generate_report",
+    "discover_assets",
+    "assess_risk",
 })
 
 # Confidence thresholds

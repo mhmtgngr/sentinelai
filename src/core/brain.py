@@ -12,10 +12,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from src.core.asset_inventory import AssetInventory
 from src.core.autonomous import AutonomousDecisionEngine, DecisionOutcome
 from src.core.config import SentinelConfig
 from src.core.event_bus import Event, EventBus, EventType
+from src.core.playbook_engine import PlaybookEngine
 from src.core.self_learning import SelfLearningSystem
+from src.core.threat_modeling import ThreatModeler
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,11 @@ class SentinelBrain:
         # Self-learning system
         self.learning = SelfLearningSystem(event_bus)
 
+        # Asset inventory, playbook engine, threat modeler
+        self.asset_inventory = AssetInventory(event_bus)
+        self.playbook_engine = PlaybookEngine(event_bus)
+        self.threat_modeler = ThreatModeler()
+
         # Track cycle metrics
         self._cycle_count = 0
         self._events_processed = 0
@@ -93,11 +101,21 @@ class SentinelBrain:
             except Exception:
                 logger.exception("Failed to initialize agent: %s", name)
 
+        # Load playbooks
+        self.playbook_engine.load_playbooks("config/playbooks")
+
+        # Wire purple team to red team if both registered
+        purple = self._agents.get("purple_team")
+        red = self._agents.get("red_team")
+        if purple and red:
+            purple.set_red_team(red)
+
         # Subscribe to events
         self.event_bus.subscribe(EventType.ALERT_RECEIVED, self._handle_alert)
         self.event_bus.subscribe(EventType.THREAT_DETECTED, self._handle_threat)
         self.event_bus.subscribe(EventType.ACTION_EXECUTED, self._handle_action_outcome)
         self.event_bus.subscribe(EventType.ACTION_FAILED, self._handle_action_outcome)
+        self.event_bus.subscribe(EventType.RED_TEAM_CAMPAIGN_COMPLETED, self._handle_red_team_result)
 
         # Start autonomous loops
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -279,6 +297,12 @@ class SentinelBrain:
                 source=agent_name,
             ))
 
+    async def _handle_red_team_result(self, event: Event) -> None:
+        """Feed red team campaign results to purple team for coverage analysis."""
+        purple = self._agents.get("purple_team")
+        if purple:
+            purple.build_coverage_matrix()
+
     async def _handle_action_outcome(self, event: Event) -> None:
         """Track action outcomes for self-learning."""
         result_data = event.data.get("result", {})
@@ -326,7 +350,7 @@ class SentinelBrain:
 
     def get_status(self) -> dict[str, Any]:
         """Return full system status including autonomy and learning metrics."""
-        return {
+        status = {
             "running": self._running,
             "mode": "autonomous",
             "agents": list(self._agents.keys()),
@@ -339,4 +363,13 @@ class SentinelBrain:
             "decision_stats": self.decision_engine.get_stats(),
             "learning": self.learning.get_learning_report(),
             "event_history_size": len(self.event_bus._history),
+            "attack_surface": self.asset_inventory.get_attack_surface(),
+            "playbook_stats": self.playbook_engine.get_stats(),
         }
+
+        # Add purple team coverage if available
+        purple = self._agents.get("purple_team")
+        if purple:
+            status["coverage_score"] = purple.get_coverage_score()
+
+        return status

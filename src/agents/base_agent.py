@@ -20,6 +20,9 @@ class AgentCapability(str, Enum):
     COMPLIANCE = "compliance"
     FORENSICS = "forensics"
     VULNERABILITY_SCAN = "vulnerability_scan"
+    RED_TEAM = "red_team"
+    PURPLE_TEAM = "purple_team"
+    ASSET_MANAGEMENT = "asset_management"
 
 
 @dataclass

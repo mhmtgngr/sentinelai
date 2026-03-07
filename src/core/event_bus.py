@@ -47,6 +47,23 @@ class EventType(str, Enum):
     FEEDBACK_RECEIVED = "learning.feedback"
     MODEL_UPDATED = "learning.model_updated"
 
+    # Red team
+    RED_TEAM_SIMULATION = "red_team.simulation"
+    RED_TEAM_CAMPAIGN_STARTED = "red_team.campaign.started"
+    RED_TEAM_CAMPAIGN_COMPLETED = "red_team.campaign.completed"
+
+    # Purple team
+    PURPLE_TEAM_EXERCISE = "purple_team.exercise"
+    COVERAGE_GAP_DETECTED = "purple_team.coverage_gap"
+
+    # Playbook / SOAR
+    PLAYBOOK_EXECUTED = "playbook.executed"
+    PLAYBOOK_STEP_COMPLETED = "playbook.step_completed"
+
+    # Asset management
+    ASSET_DISCOVERED = "asset.discovered"
+    ATTACK_SURFACE_CHANGED = "asset.surface_changed"
+
 
 @dataclass
 class Event:

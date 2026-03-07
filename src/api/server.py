@@ -14,6 +14,7 @@ from src.api.routes.memory import router as memory_router
 from src.api.routes.detection import router as detection_router
 from src.api.routes.system import router as system_router
 from src.api.routes.approvals import router as approvals_router
+from src.api.routes.reporting import router as reporting_router
 from src.api.websocket import router as ws_router
 from src.core.brain import SentinelBrain
 from src.core.config import SentinelConfig
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router, prefix="/api/v1/memory", tags=["memory"])
     app.include_router(detection_router, prefix="/api/v1/detection", tags=["detection"])
     app.include_router(approvals_router, prefix="/api/v1/approvals", tags=["approvals"])
+    app.include_router(reporting_router, prefix="/api/v1/reporting", tags=["reporting"])
     app.include_router(ws_router, tags=["websocket"])
 
     return app
