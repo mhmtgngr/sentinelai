@@ -1,76 +1,111 @@
-"""Abstract base for all Sentinel-AI agents."""
+"""Abstract base class for all Sentinel-AI agents.
+
+Each agent processes security events and produces AgentDecision objects.
+See docs/agent-coordination.md for lifecycle and coordination details.
+"""
 
 from __future__ import annotations
 
+import abc
+import asyncio
 import logging
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any
-from uuid import uuid4
+from datetime import datetime
 
-from src.core.event_bus import Event, EventBus
+from src.core.models import AgentDecision, Alert
+
+logger = logging.getLogger(__name__)
 
 
-class AgentCapability(str, Enum):
-    TRIAGE = "triage"
-    THREAT_HUNTING = "threat_hunting"
-    INCIDENT_RESPONSE = "incident_response"
-    COMPLIANCE = "compliance"
-    FORENSICS = "forensics"
-    VULNERABILITY_SCAN = "vulnerability_scan"
-    RED_TEAM = "red_team"
-    PURPLE_TEAM = "purple_team"
-    ASSET_MANAGEMENT = "asset_management"
+class BaseAgent(abc.ABC):
+    """Abstract base for all security agents.
 
+    Subclasses must implement:
+        - process(): Core logic for processing an alert
+        - capabilities: Property listing what this agent can do
+    """
 
-@dataclass
-class AgentResult:
-    agent_name: str
-    action: str
-    success: bool
-    data: dict[str, Any] = field(default_factory=dict)
-    result_id: str = field(default_factory=lambda: str(uuid4()))
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    error: str | None = None
+    def __init__(
+        self,
+        agent_id: str,
+        timeout_seconds: float = 60.0,
+        confidence_threshold: float = 0.75,
+        max_retries: int = 3,
+    ) -> None:
+        self.agent_id = agent_id
+        self.timeout_seconds = timeout_seconds
+        self.confidence_threshold = confidence_threshold
+        self.max_retries = max_retries
+        self._is_processing = False
 
-
-class BaseAgent(ABC):
-    """Abstract base class for all Sentinel-AI security agents."""
-
-    name: str = "base"
-    capability: AgentCapability = AgentCapability.TRIAGE
-
-    def __init__(self, event_bus: EventBus, config: dict | None = None) -> None:
-        self.event_bus = event_bus
-        self.config = config or {}
-        self.logger = logging.getLogger(f"sentinel.agent.{self.name}")
-        self._initialized = False
-
-    async def initialize(self) -> None:
-        """Initialize the agent. Override for custom setup."""
-        self._initialized = True
-        self.logger.info("Agent %s initialized", self.name)
-
-    @abstractmethod
-    async def process(self, event: Event) -> AgentResult:
-        """Process an incoming event. Must be implemented by all agents."""
+    @property
+    @abc.abstractmethod
+    def capabilities(self) -> list[str]:
+        """List of capabilities this agent provides (e.g., 'triage', 'hunt', 'respond')."""
         ...
 
-    @abstractmethod
-    async def run_autonomous(self) -> list[AgentResult]:
-        """Run autonomous checks (called during heartbeat). Must be implemented."""
+    @abc.abstractmethod
+    async def process(self, alert: Alert) -> AgentDecision:
+        """Process an alert and return a decision.
+
+        This is the core logic method. Implementations should:
+        1. Analyze the alert data
+        2. Consult relevant data sources
+        3. Produce a decision with confidence score and reasoning trace
+        """
         ...
 
-    async def emit_result(self, result: AgentResult) -> None:
-        """Publish an agent result as an event."""
-        from src.core.event_bus import EventType
-        event_type = (
-            EventType.ACTION_EXECUTED if result.success else EventType.ACTION_FAILED
-        )
-        await self.event_bus.publish(Event(
-            event_type=event_type,
-            data={"result": result.__dict__},
-            source=self.name,
-        ))
+    async def execute(self, alert: Alert) -> AgentDecision:
+        """Execute agent processing with timeout and error handling.
+
+        This wraps process() with:
+        - Timeout enforcement
+        - Error logging
+        - State tracking
+        """
+        self._is_processing = True
+        try:
+            decision = await asyncio.wait_for(
+                self.process(alert),
+                timeout=self.timeout_seconds,
+            )
+            logger.info(
+                "Agent '%s' processed alert '%s' (confidence: %.2f)",
+                self.agent_id,
+                alert.id,
+                decision.confidence,
+            )
+            return decision
+        except asyncio.TimeoutError:
+            logger.error(
+                "Agent '%s' timed out after %.0fs on alert '%s'",
+                self.agent_id,
+                self.timeout_seconds,
+                alert.id,
+            )
+            return AgentDecision(
+                agent_id=self.agent_id,
+                alert_id=alert.id,
+                confidence=0.0,
+                reasoning_trace=[f"Agent timed out after {self.timeout_seconds}s"],
+                timestamp=datetime.utcnow(),
+            )
+        except Exception:
+            logger.exception("Agent '%s' failed on alert '%s'", self.agent_id, alert.id)
+            return AgentDecision(
+                agent_id=self.agent_id,
+                alert_id=alert.id,
+                confidence=0.0,
+                reasoning_trace=["Agent encountered an unrecoverable error"],
+                timestamp=datetime.utcnow(),
+            )
+        finally:
+            self._is_processing = False
+
+    @property
+    def is_processing(self) -> bool:
+        """Whether this agent is currently processing a task."""
+        return self._is_processing
+
+    def meets_confidence_threshold(self, decision: AgentDecision) -> bool:
+        """Check if a decision meets this agent's confidence threshold."""
+        return decision.confidence >= self.confidence_threshold

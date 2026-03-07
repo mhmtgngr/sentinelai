@@ -1,76 +1,45 @@
-"""Alert management API routes."""
+"""Alert management endpoints."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
-from pydantic import BaseModel
-
-from src.core.event_bus import Event, EventType
+from fastapi import APIRouter
 
 router = APIRouter()
 
-
-class AlertSubmission(BaseModel):
-    source: str = ""
-    severity: str = "info"
-    description: str = ""
-    source_ip: str = ""
-    destination_ip: str = ""
-    rule_id: str = ""
-    rule_name: str = ""
-    raw_data: dict[str, Any] = {}
+_alerts: dict[str, dict[str, Any]] = {}
 
 
-class FeedbackSubmission(BaseModel):
-    alert_id: str
-    verdict: str  # true_positive, false_positive, benign, needs_tuning
-    analyst_notes: str = ""
-    rule_id: str = ""
+@router.get("/alerts")
+async def list_alerts(
+    status: str | None = None,
+    severity: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List alerts with filtering and pagination."""
+    alerts = list(_alerts.values())
+    if severity:
+        alerts = [a for a in alerts if a.get("severity") == severity.upper()]
+    total = len(alerts)
+    alerts = alerts[offset : offset + limit]
+    return {"alerts": alerts, "total": total, "limit": limit, "offset": offset}
 
 
-@router.post("/")
-async def submit_alert(alert: AlertSubmission, request: Request) -> dict[str, Any]:
-    """Submit a new security alert for triage."""
-    event_bus = request.app.state.event_bus
-    event = Event(
-        event_type=EventType.ALERT_RECEIVED,
-        data=alert.model_dump(),
-        source=alert.source or "api",
-    )
-    await event_bus.publish(event)
-    return {"status": "accepted", "event_id": event.event_id}
+@router.get("/alerts/{alert_id}")
+async def get_alert(alert_id: str) -> dict:
+    """Get detailed alert with all events."""
+    alert = _alerts.get(alert_id)
+    if alert:
+        return alert
+    return {"alert_id": alert_id, "detail": "not_found"}
 
 
-@router.get("/history")
-async def get_alert_history(request: Request, limit: int = 100, event_type: str | None = None) -> dict[str, Any]:
-    """Get recent alert history."""
-    event_bus = request.app.state.event_bus
-    et = EventType(event_type) if event_type else EventType.ALERT_RECEIVED
-    history = event_bus.get_history(event_type=et, limit=limit)
-    return {
-        "count": len(history),
-        "alerts": [
-            {
-                "event_id": e.event_id,
-                "event_type": e.event_type.value,
-                "source": e.source,
-                "timestamp": e.timestamp.isoformat(),
-                "data": e.data,
-            }
-            for e in history
-        ],
-    }
-
-
-@router.post("/feedback")
-async def submit_feedback(feedback: FeedbackSubmission, request: Request) -> dict[str, Any]:
-    """Submit analyst feedback on an alert (for learning engine)."""
-    event_bus = request.app.state.event_bus
-    await event_bus.publish(Event(
-        event_type=EventType.FEEDBACK_RECEIVED,
-        data=feedback.model_dump(),
-        source="api",
-    ))
-    return {"status": "recorded", "alert_id": feedback.alert_id}
+@router.post("/alerts/{alert_id}/verdict")
+async def submit_verdict(alert_id: str, verdict: str = "UNDETERMINED", notes: str = "") -> dict:
+    """Submit analyst verdict for an alert."""
+    if alert_id in _alerts:
+        _alerts[alert_id]["triage_verdict"] = verdict
+        _alerts[alert_id]["analyst_notes"] = notes
+    return {"alert_id": alert_id, "status": "verdict_recorded", "verdict": verdict}

@@ -1,33 +1,64 @@
-"""Tests for configuration management."""
+"""Tests for configuration module."""
+
+from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
+
 import pytest
-from src.core.config import SentinelConfig, LLMConfig, ChromaConfig, APIConfig
+import yaml
+
+from src.core.config import Settings, load_yaml_config
 
 
-def test_default_config():
-    config = SentinelConfig()
-    assert config.llm.provider == "claude"
-    assert config.chroma.port == 8000
-    assert config.api.port == 8080
-    assert config.heartbeat_interval == 60
+def test_settings_defaults():
+    settings = Settings()
+    assert settings.api_host == "0.0.0.0"
+    assert settings.api_port == 8000
+    assert settings.log_level == "INFO"
 
 
-def test_config_from_env(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("LLM_MODEL", "gpt-4")
-    monkeypatch.setenv("API_PORT", "9090")
-    monkeypatch.setenv("HEARTBEAT_INTERVAL", "120")
-
-    config = SentinelConfig.from_env()
-    assert config.llm.provider == "openai"
-    assert config.llm.model == "gpt-4"
-    assert config.api.port == 9090
-    assert config.heartbeat_interval == 120
+def test_settings_chromadb_defaults():
+    settings = Settings()
+    assert settings.chromadb_host == "localhost"
+    assert settings.chromadb_port == 8100
 
 
-def test_config_from_yaml():
-    config = SentinelConfig.from_yaml("config")
-    # Should load without error even with all adapters commented out
-    assert isinstance(config.adapters, list)
-    assert isinstance(config.agents, dict)
+def test_load_yaml_config_valid():
+    data = {"key": "value", "nested": {"a": 1}}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        result = load_yaml_config(Path(f.name))
+    os.unlink(f.name)
+    assert result == data
+
+
+def test_load_yaml_config_missing_file():
+    result = load_yaml_config(Path("/nonexistent/path.yml"))
+    assert result == {}
+
+
+def test_load_yaml_config_empty_file():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        f.write("")
+        f.flush()
+        result = load_yaml_config(Path(f.name))
+    os.unlink(f.name)
+    assert result == {}
+
+
+def test_settings_default_confidence_threshold():
+    settings = Settings()
+    assert settings.default_confidence_threshold == 0.75
+
+
+def test_settings_shadow_mode():
+    settings = Settings()
+    assert settings.shadow_mode is True
+
+
+def test_settings_max_blast_radius():
+    settings = Settings()
+    assert settings.max_blast_radius == 5

@@ -1,204 +1,134 @@
-"""Vulnerability assessment agent."""
+"""Vulnerability Scanner Agent — Periodic vulnerability assessment.
+
+Scans registered assets for known vulnerabilities,
+cross-references with MITRE ATT&CK, and assesses exploitability.
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
-from src.agents.base_agent import AgentCapability, AgentResult, BaseAgent
-from src.core.event_bus import Event, EventBus, EventType
+from src.agents.base_agent import BaseAgent
+from src.core.models import AgentDecision, Alert, Severity
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class Vulnerability:
-    vuln_id: str = field(default_factory=lambda: str(uuid4()))
-    cve_id: str = ""
-    title: str = ""
-    severity: str = "medium"
-    cvss_score: float = 0.0
-    affected_asset: str = ""
-    description: str = ""
-    remediation: str = ""
-    status: str = "open"
-    discovered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# Common vulnerability check definitions
-VULN_CHECKS = [
-    {
-        "id": "VS-001",
-        "name": "Outdated SSL/TLS versions",
-        "description": "Check for SSLv3, TLS 1.0, TLS 1.1 in use",
-        "severity": "high",
-        "remediation": "Upgrade to TLS 1.2 or TLS 1.3",
+KNOWN_VULN_PATTERNS = {
+    "ssh": {
+        "cves": ["CVE-2023-38408", "CVE-2023-48795"],
+        "mitre": ["T1021.004"],
+        "severity": Severity.HIGH,
     },
-    {
-        "id": "VS-002",
-        "name": "Default credentials",
-        "description": "Check for services using default usernames and passwords",
-        "severity": "critical",
-        "remediation": "Change all default credentials immediately",
+    "http": {
+        "cves": ["CVE-2024-23897", "CVE-2023-44487"],
+        "mitre": ["T1190"],
+        "severity": Severity.CRITICAL,
     },
-    {
-        "id": "VS-003",
-        "name": "Open management ports",
-        "description": "Check for exposed RDP (3389), SSH (22), telnet (23) to public",
-        "severity": "high",
-        "remediation": "Restrict management ports to bastion hosts or VPN",
+    "smb": {
+        "cves": ["CVE-2020-0796", "CVE-2017-0144"],
+        "mitre": ["T1021.002", "T1210"],
+        "severity": Severity.CRITICAL,
     },
-    {
-        "id": "VS-004",
-        "name": "Missing security patches",
-        "description": "Check for known CVEs with available patches",
-        "severity": "high",
-        "remediation": "Apply vendor patches per patch management policy",
+    "rdp": {
+        "cves": ["CVE-2019-0708"],
+        "mitre": ["T1021.001"],
+        "severity": Severity.CRITICAL,
     },
-    {
-        "id": "VS-005",
-        "name": "Weak authentication",
-        "description": "Check for services without MFA or with weak password policies",
-        "severity": "medium",
-        "remediation": "Enable MFA and enforce strong password policies",
-    },
-    {
-        "id": "VS-006",
-        "name": "Misconfigured CORS",
-        "description": "Check for overly permissive CORS headers on web services",
-        "severity": "medium",
-        "remediation": "Restrict CORS to specific trusted origins",
-    },
-    {
-        "id": "VS-007",
-        "name": "Exposed sensitive endpoints",
-        "description": "Check for exposed admin panels, debug endpoints, API docs",
-        "severity": "high",
-        "remediation": "Restrict access or disable debug endpoints in production",
-    },
-]
+}
 
 
 class VulnScannerAgent(BaseAgent):
-    """Scans for vulnerabilities across connected security products and assets."""
+    """Vulnerability assessment agent.
 
-    name = "vuln_scanner"
-    capability = AgentCapability.VULNERABILITY_SCAN
+    Identifies vulnerabilities in affected assets by cross-referencing
+    with known vulnerability databases and MITRE ATT&CK.
+    """
 
-    def __init__(self, event_bus: EventBus, config: dict | None = None) -> None:
-        super().__init__(event_bus, config)
-        self._vulnerabilities: dict[str, Vulnerability] = {}
-        self._scan_history: list[dict[str, Any]] = []
+    def __init__(
+        self,
+        llm_client: Any = None,
+        llm_model: str = "claude-haiku-4-5-20251001",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(agent_id="vuln_scanner", timeout_seconds=600, confidence_threshold=0.70, **kwargs)
+        self._llm_client = llm_client
+        self._llm_model = llm_model
 
-    async def process(self, event: Event) -> AgentResult:
-        """Process a scan request or CVE advisory event."""
-        data = event.data
-        scan_type = data.get("scan_type", "targeted")
+    @property
+    def capabilities(self) -> list[str]:
+        return ["scan", "assess_vulnerability"]
 
-        if scan_type == "cve_advisory":
-            return await self._check_cve_advisory(data)
+    async def process(self, alert: Alert) -> AgentDecision:
+        """Assess vulnerabilities related to an alert."""
+        vuln_findings = self._check_known_vulns(alert)
 
-        vulns_found = await self._run_targeted_scan(data)
-
-        return AgentResult(
-            agent_name=self.name,
-            action="scan",
-            success=True,
-            data={
-                "scan_type": scan_type,
-                "vulnerabilities_found": len(vulns_found),
-                "critical": sum(1 for v in vulns_found if v.severity == "critical"),
-                "high": sum(1 for v in vulns_found if v.severity == "high"),
-            },
+        return AgentDecision(
+            agent_id=self.agent_id,
+            alert_id=alert.id,
+            confidence=0.75 if vuln_findings else 0.50,
+            reasoning_trace=[
+                f"Checked {len(KNOWN_VULN_PATTERNS)} vulnerability patterns",
+                f"Findings: {len(vuln_findings)} potential vulnerabilities",
+                *[f"  - {f['service']}: {f['cves']}" for f in vuln_findings],
+            ],
+            recommended_actions=[
+                {
+                    "type": "ADD_TO_WATCHLIST",
+                    "target": finding["service"],
+                    "reason": f"Potential vulnerability: {finding['cves']}",
+                }
+                for finding in vuln_findings
+            ],
+            data_sources_consulted=["known_vuln_db", "mitre_attack"],
         )
 
-    async def run_autonomous(self) -> list[AgentResult]:
-        """Run periodic vulnerability assessments."""
-        results = []
-        all_vulns: list[Vulnerability] = []
+    def _check_known_vulns(self, alert: Alert) -> list[dict[str, Any]]:
+        """Check alert data against known vulnerability patterns."""
+        findings: list[dict[str, Any]] = []
 
-        for check in VULN_CHECKS:
-            vulns = self._execute_check(check)
-            all_vulns.extend(vulns)
+        all_text = " ".join(
+            f"{e.event_type} {str(e.normalized)} {str(e.raw_payload)}"
+            for e in alert.events
+        ).lower()
 
-        for vuln in all_vulns:
-            self._vulnerabilities[vuln.vuln_id] = vuln
-            if vuln.severity in ("critical", "high"):
-                await self.event_bus.publish(Event(
-                    event_type=EventType.ALERT_RECEIVED,
-                    data={
-                        "type": "vulnerability",
-                        "vuln_id": vuln.vuln_id,
-                        "cve_id": vuln.cve_id,
-                        "severity": vuln.severity,
-                        "title": vuln.title,
-                        "affected_asset": vuln.affected_asset,
-                    },
-                    source=self.name,
-                ))
+        for service, vuln_info in KNOWN_VULN_PATTERNS.items():
+            if service in all_text:
+                findings.append({
+                    "service": service,
+                    "cves": vuln_info["cves"],
+                    "mitre": vuln_info["mitre"],
+                    "severity": vuln_info["severity"].value,
+                })
 
-        self._scan_history.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "checks_run": len(VULN_CHECKS),
-            "vulns_found": len(all_vulns),
-        })
+        mitre_in_alert: set[str] = set()
+        for event in alert.events:
+            mitre_in_alert.update(event.mitre_attack)
 
-        results.append(AgentResult(
-            agent_name=self.name,
-            action="periodic_scan",
-            success=True,
-            data={
-                "checks_run": len(VULN_CHECKS),
-                "vulnerabilities_found": len(all_vulns),
-            },
-        ))
-        return results
+        for service, vuln_info in KNOWN_VULN_PATTERNS.items():
+            if mitre_in_alert & set(vuln_info["mitre"]):
+                if not any(f["service"] == service for f in findings):
+                    findings.append({
+                        "service": service,
+                        "cves": vuln_info["cves"],
+                        "mitre": vuln_info["mitre"],
+                        "severity": vuln_info["severity"].value,
+                        "matched_by": "mitre_technique",
+                    })
 
-    async def _run_targeted_scan(self, data: dict) -> list[Vulnerability]:
-        """Run a targeted scan against a specific asset or check."""
-        target = data.get("target", "")
-        vulns = []
-        for check in VULN_CHECKS:
-            found = self._execute_check(check, target=target)
-            vulns.extend(found)
-        return vulns
+        return findings
 
-    async def _check_cve_advisory(self, data: dict) -> AgentResult:
-        """Check if a newly published CVE affects our environment."""
-        cve_id = data.get("cve_id", "")
-        affected_products = data.get("affected_products", [])
+    async def scheduled_scan(self, asset_list: list[str] | None = None) -> AgentDecision:
+        """Run a periodic vulnerability scan across known assets."""
+        assets = asset_list or []
 
-        # In production, this would query asset inventory and patch management
-        return AgentResult(
-            agent_name=self.name,
-            action="cve_check",
-            success=True,
-            data={
-                "cve_id": cve_id,
-                "affected_products": affected_products,
-                "assets_at_risk": 0,
-            },
+        return AgentDecision(
+            agent_id=self.agent_id,
+            confidence=0.70,
+            reasoning_trace=[
+                "Scheduled vulnerability scan",
+                f"Assets scanned: {len(assets)}",
+                "No active scanning implemented — using pattern matching only",
+            ],
+            data_sources_consulted=["known_vuln_db"],
         )
-
-    def _execute_check(self, check: dict, target: str = "") -> list[Vulnerability]:
-        """Execute a vulnerability check. In production, queries real systems."""
-        # Framework placeholder — real implementation queries adapters
-        return []
-
-    def get_vulnerability_report(self) -> dict[str, Any]:
-        vulns = list(self._vulnerabilities.values())
-        return {
-            "total": len(vulns),
-            "by_severity": {
-                "critical": sum(1 for v in vulns if v.severity == "critical"),
-                "high": sum(1 for v in vulns if v.severity == "high"),
-                "medium": sum(1 for v in vulns if v.severity == "medium"),
-                "low": sum(1 for v in vulns if v.severity == "low"),
-            },
-            "open": sum(1 for v in vulns if v.status == "open"),
-            "remediated": sum(1 for v in vulns if v.status == "remediated"),
-            "scan_history": self._scan_history[-10:],
-        }

@@ -1,82 +1,87 @@
-"""Dynamic adapter discovery and registration."""
+"""Dynamic adapter discovery and registration.
+
+Manages the lifecycle of all security product adapters.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from src.core.models import HealthStatus
 from src.integrations.base_adapter import BaseSecurityAdapter
 
 logger = logging.getLogger(__name__)
 
 
 class AdapterRegistry:
-    """Registry for dynamically discovering and managing security product adapters."""
+    """Registry for security product adapters.
+
+    Manages adapter instances, provides lookup by type/vendor,
+    and aggregates health status.
+    """
 
     def __init__(self) -> None:
-        self._adapter_classes: dict[str, type[BaseSecurityAdapter]] = {}
-        self._instances: dict[str, BaseSecurityAdapter] = {}
+        self._adapters: dict[str, BaseSecurityAdapter] = {}
 
-    def register_class(self, vendor: str, adapter_class: type[BaseSecurityAdapter]) -> None:
-        """Register an adapter class by vendor name."""
-        self._adapter_classes[vendor] = adapter_class
-        logger.info("Registered adapter class: %s", vendor)
-
-    def create_adapter(self, vendor: str, config: dict[str, Any]) -> BaseSecurityAdapter:
-        """Create an adapter instance from a registered class."""
-        if vendor not in self._adapter_classes:
-            raise ValueError(f"Unknown adapter vendor: {vendor}. Registered: {list(self._adapter_classes.keys())}")
-        adapter = self._adapter_classes[vendor](config)
-        instance_name = f"{vendor}_{config.get('name', 'default')}"
-        self._instances[instance_name] = adapter
-        return adapter
-
-    def get_adapter(self, name: str) -> BaseSecurityAdapter | None:
-        return self._instances.get(name)
-
-    def list_adapters(self) -> dict[str, dict[str, Any]]:
-        return {
-            name: {
-                "vendor": adapter.vendor,
-                "product_type": adapter.product_type,
-                "connected": adapter.is_connected,
-                "endpoint": adapter.endpoint,
-            }
-            for name, adapter in self._instances.items()
-        }
-
-    def auto_register_builtin(self) -> None:
-        """Register all built-in adapter classes."""
-        from src.integrations.firewall_adapter import PaloAltoAdapter
-        from src.integrations.siem_adapter import QRadarAdapter
-        from src.integrations.identity_adapter import EntraIDAdapter
-        from src.integrations.edr_adapter import DefenderXDRAdapter
-        from src.integrations.microsoft_adapter import (
-            ExchangeOnlineAdapter,
-            TeamsAdapter,
-            SecurityCenterAdapter,
+    def register(self, adapter_id: str, adapter: BaseSecurityAdapter) -> None:
+        """Register an adapter instance."""
+        self._adapters[adapter_id] = adapter
+        logger.info(
+            "Registered adapter '%s' (%s/%s)",
+            adapter_id,
+            adapter.product_type,
+            adapter.vendor,
         )
 
-        for cls in [
-            PaloAltoAdapter,
-            QRadarAdapter,
-            EntraIDAdapter,
-            DefenderXDRAdapter,
-            ExchangeOnlineAdapter,
-            TeamsAdapter,
-            SecurityCenterAdapter,
-        ]:
-            self.register_class(cls.vendor, cls)
+    def unregister(self, adapter_id: str) -> None:
+        """Remove an adapter from the registry."""
+        if adapter_id in self._adapters:
+            del self._adapters[adapter_id]
+            logger.info("Unregistered adapter '%s'", adapter_id)
 
-    async def connect_from_config(self, adapters_config: list[dict]) -> list[BaseSecurityAdapter]:
-        """Create and connect adapters from configuration."""
-        connected = []
-        for adapter_cfg in adapters_config:
-            vendor = adapter_cfg.get("vendor", "")
+    def get(self, adapter_id: str) -> BaseSecurityAdapter | None:
+        """Get an adapter by ID."""
+        return self._adapters.get(adapter_id)
+
+    def get_by_type(self, product_type: str) -> list[BaseSecurityAdapter]:
+        """Get all adapters of a given product type (e.g., 'firewall')."""
+        return [a for a in self._adapters.values() if a.product_type == product_type]
+
+    def get_by_vendor(self, vendor: str) -> list[BaseSecurityAdapter]:
+        """Get all adapters for a given vendor."""
+        return [a for a in self._adapters.values() if a.vendor == vendor]
+
+    async def health_check_all(self) -> dict[str, HealthStatus]:
+        """Run health checks on all registered adapters."""
+        results: dict[str, HealthStatus] = {}
+        for adapter_id, adapter in self._adapters.items():
             try:
-                adapter = self.create_adapter(vendor, adapter_cfg)
-                await adapter.connect()
-                connected.append(adapter)
-            except Exception:
-                logger.exception("Failed to create/connect adapter: %s", vendor)
-        return connected
+                results[adapter_id] = await adapter.health_check()
+            except Exception as e:
+                results[adapter_id] = HealthStatus(
+                    state="UNAVAILABLE",
+                    message=str(e),
+                )
+        return results
+
+    @property
+    def adapter_ids(self) -> list[str]:
+        """List all registered adapter IDs."""
+        return list(self._adapters.keys())
+
+    @property
+    def count(self) -> int:
+        """Number of registered adapters."""
+        return len(self._adapters)
+
+    def get_all(self) -> dict[str, Any]:
+        """Get summary info for all adapters."""
+        return {
+            adapter_id: {
+                "product_type": adapter.product_type,
+                "vendor": adapter.vendor,
+                "health_state": adapter.health_state.value,
+            }
+            for adapter_id, adapter in self._adapters.items()
+        }

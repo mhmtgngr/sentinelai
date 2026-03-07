@@ -1,229 +1,112 @@
-"""Microsoft Defender for Endpoint / XDR adapter."""
+"""EDR Adapter — CrowdStrike Falcon integration.
+
+Endpoint detection, host containment, and file quarantine
+via CrowdStrike Falcon API.
+"""
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
+import logging
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from src.integrations.base_adapter import ActionResult, BaseSecurityAdapter, HealthStatus
+from src.core.models import (
+    ActionResult, ActionStatus, ActionType, HealthState, HealthStatus,
+    IOC, SecurityEvent, Severity,
+)
+from src.integrations.base_adapter import BaseSecurityAdapter
+
+logger = logging.getLogger(__name__)
 
 
-class DefenderXDRAdapter(BaseSecurityAdapter):
-    """Microsoft Defender for Endpoint adapter.
-
-    Uses the Microsoft 365 Defender API (via Microsoft Graph Security API)
-    to pull alerts, incidents, and execute response actions.
-    Requires an Entra ID app registration with SecurityAlert.Read.All,
-    SecurityIncident.ReadWrite.All, Machine.Isolate, etc.
-    """
-
+class EDRAdapter(BaseSecurityAdapter):
     product_type = "edr"
-    vendor = "defender_xdr"
+    vendor = "crowdstrike"
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
-        self._tenant_id = config.get("tenant_id") or os.getenv("DEFENDER_TENANT_ID", "")
-        self._client_id = config.get("client_id") or os.getenv("DEFENDER_CLIENT_ID", "")
-        self._client_secret = config.get("client_secret") or os.getenv("DEFENDER_CLIENT_SECRET", "")
-        self._token: str = ""
-        self._client: httpx.AsyncClient | None = None
+    def __init__(self, endpoint: str, client_id: str = "", client_secret: str = "", **kwargs: Any) -> None:
+        super().__init__(endpoint, **kwargs)
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._client = httpx.AsyncClient(base_url="https://api.crowdstrike.com", timeout=30.0)
+        self._token: str | None = None
 
-    async def _authenticate(self) -> None:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token",
-                data={
-                    "client_id": self._client_id,
-                    "client_secret": self._client_secret,
-                    "scope": "https://graph.microsoft.com/.default",
-                    "grant_type": "client_credentials",
-                },
-            )
-            resp.raise_for_status()
-            self._token = resp.json()["access_token"]
+    async def _authenticate(self) -> str:
+        response = await self._client.post("/oauth2/token", data={"client_id": self._client_id, "client_secret": self._client_secret})
+        response.raise_for_status()
+        self._token = response.json()["access_token"]
+        self._client.headers["Authorization"] = f"Bearer {self._token}"
+        return self._token
 
-        self._client = httpx.AsyncClient(
-            base_url="https://graph.microsoft.com/v1.0",
-            headers={"Authorization": f"Bearer {self._token}"},
-            timeout=30.0,
-        )
+    async def get_events(self, since: datetime) -> list[SecurityEvent]:
+        if not self._token:
+            await self._authenticate()
 
-    async def get_events(self, since: datetime | None = None) -> list[dict[str, Any]]:
-        """Fetch alerts from Microsoft 365 Defender."""
-        if not self._client:
-            return []
-        try:
-            params: dict[str, str] = {"$top": "100", "$orderby": "createdDateTime desc"}
-            if since:
-                params["$filter"] = f"createdDateTime ge {since.isoformat()}Z"
-            resp = await self._client.get("/security/alerts_v2", params=params)
-            resp.raise_for_status()
-            return self._parse_alerts(resp.json())
-        except Exception:
-            self.logger.exception("Error fetching Defender alerts")
+        response = await self._client.get("/detects/queries/detects/v1", params={"filter": f"created_timestamp:>'{since.isoformat()}Z'", "limit": 100})
+        response.raise_for_status()
+        detect_ids = response.json().get("resources", [])
+
+        if not detect_ids:
             return []
 
-    async def health_check(self) -> HealthStatus:
-        if not self._client:
-            return HealthStatus.UNHEALTHY
-        try:
-            resp = await self._client.get("/security/alerts_v2", params={"$top": "1"})
-            return HealthStatus.HEALTHY if resp.status_code == 200 else HealthStatus.DEGRADED
-        except Exception:
-            return HealthStatus.UNHEALTHY
+        detail_response = await self._client.post("/detects/entities/summaries/GET/v1", json={"ids": detect_ids[:100]})
+        detail_response.raise_for_status()
 
-    async def get_incidents(self, since: datetime | None = None) -> list[dict[str, Any]]:
-        """Fetch incidents from Microsoft 365 Defender."""
-        if not self._client:
-            return []
-        try:
-            params: dict[str, str] = {"$top": "50", "$orderby": "createdDateTime desc"}
-            if since:
-                params["$filter"] = f"createdDateTime ge {since.isoformat()}Z"
-            resp = await self._client.get("/security/incidents", params=params)
-            resp.raise_for_status()
-            return resp.json().get("value", [])
-        except Exception:
-            self.logger.exception("Error fetching Defender incidents")
-            return []
-
-    async def isolate_host(self, machine_id: str, reason: str) -> ActionResult:
-        """Isolate a device via Microsoft Defender for Endpoint."""
-        if not self._client:
-            return ActionResult(success=False, action="isolate_host", message="Not connected")
-        try:
-            # Uses the Defender for Endpoint API (different base URL)
-            async with httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=30.0,
-            ) as client:
-                resp = await client.post(
-                    f"https://api.securitycenter.microsoft.com/api/machines/{machine_id}/isolate",
-                    json={
-                        "Comment": f"Sentinel-AI: {reason}",
-                        "IsolationType": "Full",
-                    },
-                )
-                return ActionResult(
-                    success=resp.status_code in (200, 201),
-                    action="isolate_host",
-                    message=f"Isolated machine {machine_id}: {reason}",
-                    data=resp.json() if resp.status_code in (200, 201) else {},
-                )
-        except Exception as e:
-            return ActionResult(success=False, action="isolate_host", message=str(e))
-
-    async def unisolate_host(self, machine_id: str, reason: str) -> ActionResult:
-        """Release a device from isolation."""
-        if not self._client:
-            return ActionResult(success=False, action="unisolate_host", message="Not connected")
-        try:
-            async with httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=30.0,
-            ) as client:
-                resp = await client.post(
-                    f"https://api.securitycenter.microsoft.com/api/machines/{machine_id}/unisolate",
-                    json={"Comment": f"Sentinel-AI: {reason}"},
-                )
-                return ActionResult(
-                    success=resp.status_code in (200, 201),
-                    action="unisolate_host",
-                    message=f"Released machine {machine_id} from isolation: {reason}",
-                )
-        except Exception as e:
-            return ActionResult(success=False, action="unisolate_host", message=str(e))
-
-    async def run_antivirus_scan(self, machine_id: str, scan_type: str = "Quick") -> ActionResult:
-        """Trigger AV scan on a device (Quick or Full)."""
-        if not self._client:
-            return ActionResult(success=False, action="av_scan", message="Not connected")
-        try:
-            async with httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=30.0,
-            ) as client:
-                resp = await client.post(
-                    f"https://api.securitycenter.microsoft.com/api/machines/{machine_id}/runAntiVirusScan",
-                    json={
-                        "Comment": "Sentinel-AI initiated scan",
-                        "ScanType": scan_type,
-                    },
-                )
-                return ActionResult(
-                    success=resp.status_code in (200, 201),
-                    action="av_scan",
-                    message=f"{scan_type} AV scan triggered on {machine_id}",
-                )
-        except Exception as e:
-            return ActionResult(success=False, action="av_scan", message=str(e))
-
-    async def update_incident(self, incident_id: str, status: str, classification: str = "", determination: str = "") -> ActionResult:
-        """Update a Defender incident's status/classification."""
-        if not self._client:
-            return ActionResult(success=False, action="update_incident", message="Not connected")
-        try:
-            body: dict[str, str] = {"status": status}
-            if classification:
-                body["classification"] = classification
-            if determination:
-                body["determination"] = determination
-            resp = await self._client.patch(
-                f"/security/incidents/{incident_id}",
-                json=body,
-            )
-            return ActionResult(
-                success=resp.status_code in (200, 204),
-                action="update_incident",
-                message=f"Updated incident {incident_id} to {status}",
-            )
-        except Exception as e:
-            return ActionResult(success=False, action="update_incident", message=str(e))
-
-    async def advanced_hunting(self, kql_query: str) -> list[dict[str, Any]]:
-        """Run an Advanced Hunting (KQL) query."""
-        if not self._client:
-            return []
-        try:
-            async with httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=120.0,
-            ) as client:
-                resp = await client.post(
-                    "https://api.securitycenter.microsoft.com/api/advancedqueries/run",
-                    json={"Query": kql_query},
-                )
-                resp.raise_for_status()
-                return resp.json().get("Results", [])
-        except Exception:
-            self.logger.exception("Error running Advanced Hunting query")
-            return []
-
-    def _parse_alerts(self, data: dict) -> list[dict[str, Any]]:
         events = []
-        for alert in data.get("value", []):
-            mitre = alert.get("mitreTechniques", [])
-            events.append(self._build_event(
-                alert,
-                event_type="defender_alert",
-                severity=alert.get("severity", "info").lower(),
-                description=alert.get("title", ""),
-                source_ip=self._extract_ip(alert),
-                rule_id=alert.get("detectorId", ""),
-                rule_name=alert.get("detectionSource", ""),
-                mitre_technique=", ".join(mitre),
-                mitre_tactic=alert.get("category", ""),
+        for detection in detail_response.json().get("resources", []):
+            device = detection.get("device", {})
+            behaviors = detection.get("behaviors", [{}])
+            behavior = behaviors[0] if behaviors else {}
+
+            iocs = []
+            if behavior.get("sha256"):
+                iocs.append(IOC(type="hash", value=behavior["sha256"], source="crowdstrike"))
+
+            events.append(SecurityEvent(
+                source_adapter=f"{self.product_type}/{self.vendor}",
+                event_type=behavior.get("tactic", "unknown"),
+                severity=self._map_severity(detection.get("max_severity_displayname", "Medium")),
+                raw_payload=detection,
+                normalized={"hostname": device.get("hostname"), "filename": behavior.get("filename"), "cmdline": behavior.get("cmdline")},
+                mitre_attack=[behavior.get("technique_id", "")] if behavior.get("technique_id") else [],
+                affected_assets=[device.get("hostname", "")],
+                iocs=iocs,
             ))
         return events
 
+    async def execute_action(self, action_type: ActionType, target: str, params: dict[str, Any] | None = None) -> ActionResult:
+        if not self._token:
+            await self._authenticate()
+
+        if action_type == ActionType.ISOLATE_HOST:
+            try:
+                response = await self._client.post("/devices/entities/devices-actions/v2", params={"action_name": "contain"}, json={"ids": [target]})
+                response.raise_for_status()
+                return ActionResult(action_type=action_type, target=target, status=ActionStatus.SUCCESS, adapter_used=f"{self.product_type}/{self.vendor}", rollback_capable=True, rollback_procedure=f"Lift containment on host {target}", executed_at=datetime.utcnow())
+            except httpx.HTTPError as e:
+                return ActionResult(action_type=action_type, target=target, status=ActionStatus.FAILED, evidence={"error": str(e)})
+
+        if action_type == ActionType.UNISOLATE_HOST:
+            try:
+                response = await self._client.post("/devices/entities/devices-actions/v2", params={"action_name": "lift_containment"}, json={"ids": [target]})
+                response.raise_for_status()
+                return ActionResult(action_type=action_type, target=target, status=ActionStatus.SUCCESS, adapter_used=f"{self.product_type}/{self.vendor}", executed_at=datetime.utcnow())
+            except httpx.HTTPError as e:
+                return ActionResult(action_type=action_type, target=target, status=ActionStatus.FAILED, evidence={"error": str(e)})
+
+        return ActionResult(action_type=action_type, target=target, status=ActionStatus.FAILED, evidence={"error": "unsupported"})
+
+    async def health_check(self) -> HealthStatus:
+        try:
+            if not self._token:
+                await self._authenticate()
+            response = await self._client.get("/sensors/queries/sensors/v1", params={"limit": 1})
+            response.raise_for_status()
+            return HealthStatus(state=HealthState.HEALTHY, message="Falcon API reachable")
+        except Exception as e:
+            return HealthStatus(state=HealthState.UNAVAILABLE, message=str(e))
+
     @staticmethod
-    def _extract_ip(alert: dict) -> str:
-        evidence = alert.get("evidence", [])
-        for e in evidence:
-            ip = e.get("ipAddress", "")
-            if ip:
-                return ip
-        return ""
+    def _map_severity(cs_severity: str) -> Severity:
+        return {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW, "informational": Severity.INFO}.get(cs_severity.lower(), Severity.MEDIUM)

@@ -1,220 +1,139 @@
-"""Threat intelligence enrichment from external feeds."""
+"""Threat intelligence enrichment for Sentinel-AI.
+
+Provides IOC reputation lookup, threat intel caching,
+and feed ingestion.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+import time
 from typing import Any
 
-import httpx
+from src.core.models import IOC
+from src.memory.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ThreatIntelResult:
-    indicator: str
-    indicator_type: str
-    malicious: bool = False
-    confidence: float = 0.0
-    sources: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
-    first_seen: str = ""
-    last_seen: str = ""
-    raw_data: dict[str, Any] = field(default_factory=dict)
+class ThreatIntelCache:
+    """Threat intelligence cache backed by ChromaDB.
 
+    Maintains an in-memory cache layer with TTL for fast lookups,
+    with ChromaDB as the persistent backing store.
+    """
 
-class ThreatIntelligence:
-    """Enriches IOCs against multiple threat intelligence feeds."""
+    COLLECTION_NAME = "threat_intel"
 
-    def __init__(self) -> None:
-        self._cache: dict[str, tuple[ThreatIntelResult, datetime]] = {}
-        self._cache_ttl = timedelta(hours=1)
-        self._vt_key = os.getenv("VIRUSTOTAL_API_KEY", "")
-        self._abuseipdb_key = os.getenv("ABUSEIPDB_API_KEY", "")
-        self._otx_key = os.getenv("OTX_API_KEY", "")
+    def __init__(self, vector_store: VectorStore, cache_ttl_seconds: int = 3600) -> None:
+        self._vector_store = vector_store
+        self._cache_ttl = cache_ttl_seconds
+        self._cache: dict[str, dict[str, Any]] = {}
+        self._cache_timestamps: dict[str, float] = {}
 
-    async def enrich_ip(self, ip: str) -> ThreatIntelResult:
-        """Enrich an IP address against all configured feeds."""
-        cached = self._get_cached(f"ip:{ip}")
-        if cached:
-            return cached
+    def _is_cache_valid(self, key: str) -> bool:
+        """Check if a cache entry is still valid."""
+        if key not in self._cache_timestamps:
+            return False
+        return (time.monotonic() - self._cache_timestamps[key]) < self._cache_ttl
 
-        result = ThreatIntelResult(indicator=ip, indicator_type="ip")
-        enrichments = []
+    async def enrich_ioc(self, ioc: IOC) -> dict[str, Any]:
+        """Enrich an IOC with threat intelligence data.
 
-        if self._vt_key:
-            enrichments.append(self._query_virustotal_ip(ip))
-        if self._abuseipdb_key:
-            enrichments.append(self._query_abuseipdb(ip))
-        if self._otx_key:
-            enrichments.append(self._query_otx_ip(ip))
+        Returns reputation info, associated campaigns, and MITRE techniques.
+        """
+        cache_key = f"{ioc.type}:{ioc.value}"
 
-        for coro in enrichments:
-            try:
-                partial = await coro
-                result.sources.extend(partial.sources)
-                result.tags.extend(partial.tags)
-                if partial.malicious:
-                    result.malicious = True
-                result.confidence = max(result.confidence, partial.confidence)
-            except Exception:
-                logger.exception("Error querying threat intel feed")
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key]
 
-        self._set_cached(f"ip:{ip}", result)
-        return result
+        results = await self._vector_store.search_similar(
+            query=f"{ioc.type} {ioc.value}",
+            n_results=3,
+        )
 
-    async def enrich_domain(self, domain: str) -> ThreatIntelResult:
-        """Enrich a domain against threat intel feeds."""
-        cached = self._get_cached(f"domain:{domain}")
-        if cached:
-            return cached
+        enrichment: dict[str, Any] = {
+            "ioc_type": ioc.type,
+            "ioc_value": ioc.value,
+            "reputation": "unknown",
+            "confidence": 0.0,
+            "associated_campaigns": [],
+            "mitre_techniques": [],
+            "first_seen": None,
+            "last_seen": None,
+            "related_iocs": [],
+        }
 
-        result = ThreatIntelResult(indicator=domain, indicator_type="domain")
+        if results:
+            enrichment["reputation"] = "suspicious"
+            enrichment["confidence"] = 0.5
+            enrichment["related_iocs"] = [
+                r.get("metadata", {}) for r in results[:3]
+            ]
 
-        if self._vt_key:
-            try:
-                partial = await self._query_virustotal_domain(domain)
-                result.sources.extend(partial.sources)
-                result.malicious = partial.malicious
-                result.confidence = partial.confidence
-            except Exception:
-                logger.exception("Error querying VirusTotal for domain")
+        self._cache[cache_key] = enrichment
+        self._cache_timestamps[cache_key] = time.monotonic()
 
-        self._set_cached(f"domain:{domain}", result)
-        return result
+        return enrichment
 
-    async def enrich_hash(self, file_hash: str) -> ThreatIntelResult:
-        """Enrich a file hash against threat intel feeds."""
-        cached = self._get_cached(f"hash:{file_hash}")
-        if cached:
-            return cached
+    async def add_ioc(self, ioc: IOC, intel: dict[str, Any]) -> bool:
+        """Add or update an IOC in the threat intel store."""
+        doc_text = (
+            f"type={ioc.type} value={ioc.value} "
+            f"reputation={intel.get('reputation', 'unknown')} "
+            f"campaigns={','.join(intel.get('associated_campaigns', []))} "
+            f"techniques={','.join(intel.get('mitre_techniques', []))}"
+        )
 
-        result = ThreatIntelResult(indicator=file_hash, indicator_type="hash")
+        metadata = {
+            "ioc_type": ioc.type,
+            "ioc_value": ioc.value,
+            "reputation": intel.get("reputation", "unknown"),
+            "confidence": intel.get("confidence", 0.0),
+            "source": ioc.source,
+        }
 
-        if self._vt_key:
-            try:
-                partial = await self._query_virustotal_hash(file_hash)
-                result.sources.extend(partial.sources)
-                result.malicious = partial.malicious
-                result.confidence = partial.confidence
-                result.tags = partial.tags
-            except Exception:
-                logger.exception("Error querying VirusTotal for hash")
+        success = await self._vector_store.store_pattern(
+            pattern_id=f"intel:{ioc.type}:{ioc.value}",
+            embedding_text=doc_text,
+            metadata=metadata,
+        )
 
-        self._set_cached(f"hash:{file_hash}", result)
-        return result
+        if success:
+            cache_key = f"{ioc.type}:{ioc.value}"
+            self._cache[cache_key] = {**intel, "ioc_type": ioc.type, "ioc_value": ioc.value}
+            self._cache_timestamps[cache_key] = time.monotonic()
 
-    async def _query_virustotal_ip(self, ip: str) -> ThreatIntelResult:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://www.virustotal.com/api/v3/ip_addresses/{ip}",
-                headers={"x-apikey": self._vt_key},
-                timeout=15.0,
+        return success
+
+    async def search_related(self, ioc_value: str) -> list[dict[str, Any]]:
+        """Search for IOCs related to a given value."""
+        return await self._vector_store.search_similar(
+            query=ioc_value,
+            n_results=10,
+        )
+
+    async def update_from_feed(self, feed_data: list[dict[str, Any]]) -> int:
+        """Ingest IOCs from a threat intel feed. Returns count of IOCs added."""
+        added = 0
+        for entry in feed_data:
+            ioc = IOC(
+                type=entry.get("type", "unknown"),
+                value=entry.get("value", ""),
+                confidence=entry.get("confidence", 0.5),
+                source=entry.get("source", "feed"),
             )
-            resp.raise_for_status()
-            data = resp.json().get("data", {}).get("attributes", {})
-            stats = data.get("last_analysis_stats", {})
-            malicious_count = stats.get("malicious", 0)
-            total = sum(stats.values()) or 1
-            return ThreatIntelResult(
-                indicator=ip,
-                indicator_type="ip",
-                malicious=malicious_count > 2,
-                confidence=malicious_count / total,
-                sources=["virustotal"],
-                tags=list(data.get("tags", [])),
-            )
+            intel = {
+                "reputation": entry.get("reputation", "malicious"),
+                "associated_campaigns": entry.get("campaigns", []),
+                "mitre_techniques": entry.get("techniques", []),
+            }
+            if await self.add_ioc(ioc, intel):
+                added += 1
+        logger.info("Ingested %d/%d IOCs from feed", added, len(feed_data))
+        return added
 
-    async def _query_virustotal_domain(self, domain: str) -> ThreatIntelResult:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://www.virustotal.com/api/v3/domains/{domain}",
-                headers={"x-apikey": self._vt_key},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json().get("data", {}).get("attributes", {})
-            stats = data.get("last_analysis_stats", {})
-            malicious_count = stats.get("malicious", 0)
-            total = sum(stats.values()) or 1
-            return ThreatIntelResult(
-                indicator=domain,
-                indicator_type="domain",
-                malicious=malicious_count > 2,
-                confidence=malicious_count / total,
-                sources=["virustotal"],
-            )
-
-    async def _query_virustotal_hash(self, file_hash: str) -> ThreatIntelResult:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://www.virustotal.com/api/v3/files/{file_hash}",
-                headers={"x-apikey": self._vt_key},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json().get("data", {}).get("attributes", {})
-            stats = data.get("last_analysis_stats", {})
-            malicious_count = stats.get("malicious", 0)
-            total = sum(stats.values()) or 1
-            return ThreatIntelResult(
-                indicator=file_hash,
-                indicator_type="hash",
-                malicious=malicious_count > 2,
-                confidence=malicious_count / total,
-                sources=["virustotal"],
-                tags=data.get("tags", []),
-            )
-
-    async def _query_abuseipdb(self, ip: str) -> ThreatIntelResult:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.abuseipdb.com/api/v2/check",
-                headers={"Key": self._abuseipdb_key, "Accept": "application/json"},
-                params={"ipAddress": ip, "maxAgeInDays": "90"},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json().get("data", {})
-            score = data.get("abuseConfidenceScore", 0)
-            return ThreatIntelResult(
-                indicator=ip,
-                indicator_type="ip",
-                malicious=score > 50,
-                confidence=score / 100,
-                sources=["abuseipdb"],
-                tags=data.get("usageType", "").split(",") if data.get("usageType") else [],
-            )
-
-    async def _query_otx_ip(self, ip: str) -> ThreatIntelResult:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general",
-                headers={"X-OTX-API-KEY": self._otx_key},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            pulse_count = data.get("pulse_info", {}).get("count", 0)
-            return ThreatIntelResult(
-                indicator=ip,
-                indicator_type="ip",
-                malicious=pulse_count > 0,
-                confidence=min(pulse_count / 10, 1.0),
-                sources=["otx"],
-                tags=[p.get("name", "") for p in data.get("pulse_info", {}).get("pulses", [])[:5]],
-            )
-
-    def _get_cached(self, key: str) -> ThreatIntelResult | None:
-        if key in self._cache:
-            result, ts = self._cache[key]
-            if datetime.now(timezone.utc) - ts < self._cache_ttl:
-                return result
-            del self._cache[key]
-        return None
-
-    def _set_cached(self, key: str, result: ThreatIntelResult) -> None:
-        self._cache[key] = (result, datetime.now(timezone.utc))
+    def clear_cache(self) -> None:
+        """Clear the in-memory cache."""
+        self._cache.clear()
+        self._cache_timestamps.clear()

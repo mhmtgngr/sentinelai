@@ -1,497 +1,268 @@
-"""Central AI Brain — autonomous multi-agent coordinator for Sentinel-AI.
+"""Central AI Brain — Multi-agent coordinator for Sentinel-AI.
 
-The brain operates autonomously: collecting events, triaging, detecting threats,
-and responding — escalating to the human operator only at critical decision points.
-All outcomes feed back into the self-learning system.
+Manages the reactive and proactive pipelines, priority queue,
+task deduplication, conflict resolution, and action validation.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
-from src.core.ai_analyzer import AIAnalyzer
-from src.core.asset_inventory import AssetInventory
-from src.core.autonomous import AutonomousDecisionEngine, DecisionOutcome
-from src.core.config import SentinelConfig
-from src.core.event_bus import Event, EventBus, EventType
-from src.core.notification_manager import NotificationManager
-from src.core.playbook_engine import PlaybookEngine
-from src.core.plugin_manager import PluginManager
-from src.core.self_learning import SelfLearningSystem
-from src.core.threat_modeling import ThreatModeler
+from src.agents.base_agent import BaseAgent
+from src.core.event_bus import EventBus
+from src.core.models import (
+    ActionType,
+    AgentDecision,
+    Alert,
+    HandoffPayload,
+    SecurityEvent,
+    Severity,
+)
+from src.integrations.adapter_registry import AdapterRegistry
 
 logger = logging.getLogger(__name__)
 
+SEVERITY_PRIORITY = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 10,
+    Severity.MEDIUM: 20,
+    Severity.LOW: 30,
+    Severity.INFO: 40,
+}
 
-class SentinelBrain:
-    """Autonomous orchestrator with self-learning and human-in-the-loop at critical points.
+AGENT_AUTHORITY = {
+    "compliance_auditor": 1,
+    "incident_responder": 2,
+    "threat_hunter": 3,
+    "forensic_analyst": 4,
+    "triage": 5,
+    "vuln_scanner": 6,
+}
 
-    Autonomous loop:
-    1. Heartbeat -> collect events from all adapters
-    2. Triage agent scores and classifies each alert
-    3. Check against learned false positive signatures -> auto-dismiss
-    4. Run autonomous agent tasks (threat hunting, compliance, vuln scanning)
-    5. For each proposed action:
-       - Decision engine evaluates confidence
-       - High confidence + safe action -> auto-execute
-       - Low confidence / destructive action -> escalate to human
-    6. All outcomes tracked -> self-learning adjusts thresholds
+ACTION_CORROBORATION_REQUIRED = {
+    ActionType.BLOCK_IP,
+    ActionType.DISABLE_ACCOUNT,
+    ActionType.ISOLATE_HOST,
+    ActionType.QUARANTINE_FILE,
+    ActionType.FORCE_PASSWORD_RESET,
+}
 
-    Human involvement:
-    - Approval queue for critical/destructive actions
-    - Outcome feedback (was the action correct?)
-    - Override capability at any point
+
+class Brain:
+    """Multi-agent coordinator managing all security pipelines.
+
+    Responsibilities:
+    - Route alerts through reactive pipeline (triage -> hunt -> respond)
+    - Schedule proactive pipelines (scans, hunts, audits)
+    - Deduplicate alerts by IOC overlap
+    - Resolve conflicts between agent decisions
+    - Validate actions before execution
     """
 
-    def __init__(self, config: SentinelConfig, event_bus: EventBus) -> None:
-        self.config = config
-        self.event_bus = event_bus
-        self._agents: dict[str, Any] = {}
-        self._adapters: dict[str, Any] = {}
-        self._running = False
-        self._heartbeat_task: asyncio.Task | None = None
-        self._autonomous_task: asyncio.Task | None = None
+    def __init__(
+        self,
+        event_bus: EventBus,
+        agents: dict[str, BaseAgent],
+        adapter_registry: AdapterRegistry,
+        confidence_threshold: float = 0.75,
+        max_blast_radius: int = 5,
+        shadow_mode: bool = True,
+    ) -> None:
+        self._event_bus = event_bus
+        self._agents = agents
+        self._adapter_registry = adapter_registry
+        self._confidence_threshold = confidence_threshold
+        self._max_blast_radius = max_blast_radius
+        self._shadow_mode = shadow_mode
 
-        # Autonomous decision engine
-        self.decision_engine = AutonomousDecisionEngine(event_bus)
+        self._alert_queue: asyncio.PriorityQueue[tuple[int, str, Alert]] = asyncio.PriorityQueue()
+        self._dedup_index: dict[str, list[str]] = defaultdict(list)
+        self._active_alerts: dict[str, Alert] = {}
+        self._decisions: dict[str, list[AgentDecision]] = defaultdict(list)
 
-        # Self-learning system
-        self.learning = SelfLearningSystem(event_bus)
-
-        # Asset inventory, playbook engine, threat modeler
-        self.asset_inventory = AssetInventory(event_bus)
-        self.playbook_engine = PlaybookEngine(event_bus)
-        self.threat_modeler = ThreatModeler()
-
-        # Plugin manager for extensibility
-        self.plugin_manager = PluginManager(event_bus)
-
-        # AI analyzer for LLM-powered alert enrichment
-        self.ai_analyzer = AIAnalyzer(config.llm)
-
-        # Notification manager for multi-channel alerting
-        self.notification_manager = NotificationManager(event_bus)
-
-        # Track cycle metrics
-        self._cycle_count = 0
-        self._events_processed = 0
-        self._actions_auto_executed = 0
-        self._actions_escalated = 0
-
-    def register_agent(self, name: str, agent: Any) -> None:
-        self._agents[name] = agent
-        logger.info("Registered agent: %s", name)
-
-    def register_adapter(self, name: str, adapter: Any) -> None:
-        self._adapters[name] = adapter
-        logger.info("Registered adapter: %s", name)
-
-    def bootstrap_agents(self, agents_config: dict[str, Any] | None = None) -> None:
-        """Auto-register all built-in agents based on config.
-
-        Reads config/agents.yaml and registers each enabled agent.
-        Also loads any plugin agents from plugins/agents/.
-        """
-        from src.agents.triage_agent import TriageAgent
-        from src.agents.threat_hunter import ThreatHunterAgent
-        from src.agents.incident_responder import IncidentResponderAgent
-        from src.agents.compliance_auditor import ComplianceAuditorAgent
-        from src.agents.forensic_analyst import ForensicAnalystAgent
-        from src.agents.vuln_scanner import VulnScannerAgent
-        from src.agents.red_team_agent import RedTeamAgent
-        from src.agents.purple_team_agent import PurpleTeamAgent
-
-        agent_map: dict[str, type] = {
-            "triage": TriageAgent,
-            "threat_hunter": ThreatHunterAgent,
-            "incident_responder": IncidentResponderAgent,
-            "compliance_auditor": ComplianceAuditorAgent,
-            "forensic_analyst": ForensicAnalystAgent,
-            "vuln_scanner": VulnScannerAgent,
-            "red_team": RedTeamAgent,
-            "purple_team": PurpleTeamAgent,
+        self._semaphores: dict[str, asyncio.Semaphore] = {
+            "triage": asyncio.Semaphore(10),
+            "threat_hunter": asyncio.Semaphore(3),
+            "incident_responder": asyncio.Semaphore(1),
+            "compliance_auditor": asyncio.Semaphore(2),
+            "forensic_analyst": asyncio.Semaphore(2),
+            "vuln_scanner": asyncio.Semaphore(1),
         }
-
-        cfg = agents_config or {}
-        for agent_name, agent_cls in agent_map.items():
-            agent_cfg = cfg.get(agent_name, {})
-            if isinstance(agent_cfg, dict) and not agent_cfg.get("enabled", True):
-                logger.info("Agent %s disabled in config, skipping", agent_name)
-                continue
-            agent = agent_cls(self.event_bus, agent_cfg if isinstance(agent_cfg, dict) else {})
-            self.register_agent(agent_name, agent)
-
-        # Discover plugin agents
-        self.plugin_manager.discover_agents("plugins/agents")
-        for name, cls in self.plugin_manager._agent_classes.items():
-            if name not in self._agents:
-                agent = cls(self.event_bus, cfg.get(name, {}))
-                self.register_agent(name, agent)
-
-    def load_plugins(self, plugins_config: dict[str, Any] | None = None) -> dict[str, int]:
-        """Load all extension plugins from configuration.
-
-        Call this after bootstrap_agents() to load technique packs,
-        STRIDE templates, and additional playbooks/sigma rules.
-        """
-        # Load plugins config
-        if plugins_config is None:
-            try:
-                import yaml
-                from pathlib import Path
-                plugins_path = Path("config/plugins.yaml")
-                if plugins_path.exists():
-                    with open(plugins_path) as f:
-                        data = yaml.safe_load(f)
-                    plugins_config = data.get("plugins", {}) if data else {}
-            except Exception:
-                logger.exception("Failed to load plugins config")
-                plugins_config = {}
-
-        results = self.plugin_manager.load_all(plugins_config or {})
-
-        # Inject custom techniques into red team agent
-        red_team = self._agents.get("red_team")
-        if red_team and self.plugin_manager._technique_packs:
-            from src.agents.red_team_agent import TECHNIQUE_LIBRARY
-            for pack in self.plugin_manager._technique_packs.values():
-                TECHNIQUE_LIBRARY.update(pack)
-            logger.info("Injected %d custom techniques into red team",
-                        sum(len(p) for p in self.plugin_manager._technique_packs.values()))
-
-        # Inject custom STRIDE templates into threat modeler
-        if self.plugin_manager._stride_templates:
-            from src.core.threat_modeling import STRIDE_TEMPLATES
-            STRIDE_TEMPLATES.update(self.plugin_manager._stride_templates)
-            logger.info("Injected %d custom STRIDE template sets",
-                        len(self.plugin_manager._stride_templates))
-
-        return results
 
     async def start(self) -> None:
-        """Start the autonomous brain."""
-        logger.info("Starting Sentinel-AI Brain (autonomous mode)...")
-        self._running = True
+        """Subscribe to event bus topics and start processing."""
+        self._event_bus.subscribe("alert.new", self._handle_new_alert)
+        self._event_bus.subscribe("investigation.requested", self._handle_investigation)
+        logger.info("Brain coordinator started (shadow_mode=%s)", self._shadow_mode)
 
-        # Initialize all adapters
-        for name, adapter in self._adapters.items():
-            try:
-                await adapter.connect()
-                await self.event_bus.publish(Event(
-                    event_type=EventType.ADAPTER_CONNECTED,
-                    data={"adapter": name},
-                    source="brain",
-                ))
-            except Exception:
-                logger.exception("Failed to connect adapter: %s", name)
+    async def _handle_new_alert(self, data: dict[str, Any]) -> None:
+        """Entry point for new alerts from the event bus."""
+        event = SecurityEvent(**data) if not isinstance(data, SecurityEvent) else data
+        alert = Alert(events=[event], priority=SEVERITY_PRIORITY.get(event.severity, 40))
 
-        # Initialize all agents
-        for name, agent in self._agents.items():
-            try:
-                await agent.initialize()
-            except Exception:
-                logger.exception("Failed to initialize agent: %s", name)
-
-        # Load playbooks
-        self.playbook_engine.load_playbooks("config/playbooks")
-
-        # Wire purple team to red team if both registered
-        purple = self._agents.get("purple_team")
-        red = self._agents.get("red_team")
-        if purple and red:
-            purple.set_red_team(red)
-
-        # Initialize notification manager
-        self.notification_manager.load_config()
-        self.notification_manager.subscribe_events()
-
-        # Inject AI analyzer into triage agent for enrichment
-        triage = self._agents.get("triage")
-        if triage:
-            triage.ai_analyzer = self.ai_analyzer
-
-        # Subscribe to events
-        self.event_bus.subscribe(EventType.ALERT_RECEIVED, self._handle_alert)
-        self.event_bus.subscribe(EventType.THREAT_DETECTED, self._handle_threat)
-        self.event_bus.subscribe(EventType.ACTION_EXECUTED, self._handle_action_outcome)
-        self.event_bus.subscribe(EventType.ACTION_FAILED, self._handle_action_outcome)
-        self.event_bus.subscribe(EventType.RED_TEAM_CAMPAIGN_COMPLETED, self._handle_red_team_result)
-
-        # Start autonomous loops
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        self._autonomous_task = asyncio.create_task(self._autonomous_agent_loop())
-
-        logger.info(
-            "Sentinel-AI Brain started: %d agents, %d adapters (autonomous mode)",
-            len(self._agents), len(self._adapters),
-        )
-
-    async def stop(self) -> None:
-        """Gracefully stop the brain and take a learning snapshot."""
-        logger.info("Stopping Sentinel-AI Brain...")
-        self._running = False
-
-        # Final learning snapshot
-        self.learning.take_snapshot()
-
-        for task in (self._heartbeat_task, self._autonomous_task):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        for name, adapter in self._adapters.items():
-            try:
-                await adapter.disconnect()
-            except Exception:
-                logger.exception("Error disconnecting adapter: %s", name)
-
-        logger.info(
-            "Sentinel-AI Brain stopped. Cycles: %d, Events: %d, Auto: %d, Escalated: %d",
-            self._cycle_count, self._events_processed,
-            self._actions_auto_executed, self._actions_escalated,
-        )
-
-    async def _heartbeat_loop(self) -> None:
-        """Periodic heartbeat — collect events from all adapters."""
-        while self._running:
-            try:
-                self._cycle_count += 1
-                await self.event_bus.publish(Event(
-                    event_type=EventType.HEARTBEAT,
-                    data={
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "cycle": self._cycle_count,
-                    },
-                    source="brain",
-                ))
-                await self._collect_events()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Error in heartbeat loop")
-            await asyncio.sleep(self.config.heartbeat_interval)
-
-    async def _autonomous_agent_loop(self) -> None:
-        """Run all agents' autonomous tasks periodically."""
-        while self._running:
-            try:
-                for name, agent in self._agents.items():
-                    try:
-                        results = await agent.run_autonomous()
-                        for result in results:
-                            if result.success and result.data:
-                                await self._process_agent_finding(name, result)
-                    except Exception:
-                        logger.exception("Error in autonomous task for agent: %s", name)
-
-                # Periodic learning snapshot
-                if self._cycle_count % 10 == 0 and self._cycle_count > 0:
-                    self.learning.take_snapshot()
-
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Error in autonomous agent loop")
-            await asyncio.sleep(self.config.heartbeat_interval * 5)
-
-    async def _collect_events(self) -> None:
-        """Pull events from all connected adapters, filtering learned false positives."""
-        for name, adapter in self._adapters.items():
-            try:
-                events = await adapter.get_events()
-                for event_data in events:
-                    self._events_processed += 1
-
-                    # Check learned false positive signatures before processing
-                    fp_score = self.learning.is_known_false_positive(event_data)
-                    if fp_score > 0.8:
-                        logger.debug("Suppressed learned FP (score=%.2f): %s",
-                                     fp_score, event_data.get("description", "")[:80])
-                        continue
-
-                    await self.event_bus.publish(Event(
-                        event_type=EventType.ALERT_RECEIVED,
-                        data=event_data,
-                        source=name,
-                    ))
-            except Exception:
-                logger.exception("Error collecting events from adapter: %s", name)
-
-    async def _handle_alert(self, event: Event) -> None:
-        """Route incoming alert through the autonomous triage pipeline."""
-        triage = self._agents.get("triage")
-        if not triage:
+        existing = self._check_deduplication(alert)
+        if existing is not None:
+            logger.info("Alert deduplicated into existing alert %s", existing.id)
+            existing.events.extend(alert.events)
             return
 
-        result = await triage.process(event)
+        self._active_alerts[alert.id] = alert
+        await self._alert_queue.put((alert.priority, alert.id, alert))
+        asyncio.create_task(self._process_alert(alert))
 
-        # If triage escalated (high severity), publish as threat
-        if result.success and result.data.get("severity_score", 0) >= 75:
-            attack_type = result.data.get("attack_type", "unknown")
-            severity = event.data.get("severity", "medium")
+    async def _handle_investigation(self, data: dict[str, Any]) -> None:
+        """Handle manual investigation requests (from OpenClaw skills)."""
+        alert = Alert(priority=data.get("priority", 10))
+        self._active_alerts[alert.id] = alert
+        asyncio.create_task(self._process_alert(alert))
 
-            # Get learned recommendations
-            recommendations = self.learning.get_recommended_actions(attack_type, severity)
-            confidence = recommendations[0]["confidence"] if recommendations else 0.6
-
-            # AI-powered alert enrichment
-            ai_analysis = None
-            try:
-                analysis = await self.ai_analyzer.analyze_alert(event.data)
-                ai_analysis = analysis.to_dict()
-            except Exception:
-                logger.debug("AI analysis unavailable, continuing without enrichment")
-
-            threat_data = {
-                **result.data,
-                "learned_confidence": confidence,
-                "recommendations": recommendations[:3],
-            }
-            if ai_analysis:
-                threat_data["ai_analysis"] = ai_analysis
-
-            await self.event_bus.publish(Event(
-                event_type=EventType.THREAT_DETECTED,
-                data=threat_data,
-                source="brain",
-            ))
-
-    async def _handle_threat(self, event: Event) -> None:
-        """Handle detected threat — create incident, propose actions via decision engine."""
-        responder = self._agents.get("incident_responder")
-        if not responder:
-            return
-
-        result = await responder.process(event)
-        if not result.success:
-            return
-
-        # Route each playbook action through the decision engine
-        for action_record in result.data.get("actions_executed", []):
-            action = action_record.get("action", "")
-            severity = event.data.get("severity", "medium")
-            base_confidence = event.data.get("learned_confidence", 0.7)
-
-            decision = await self.decision_engine.propose_action(
-                agent="incident_responder",
-                action=action,
-                target=event.data.get("source_ip", event.data.get("hostname", "unknown")),
-                severity=severity,
-                confidence=base_confidence,
-                reasoning=[
-                    f"Attack type: {event.data.get('attack_type', 'unknown')}",
-                    f"Source: {event.data.get('source', 'unknown')}",
-                    f"Playbook step for {event.data.get('attack_type', 'unknown')}",
-                    f"Learned threshold: {self.learning.get_confidence_threshold(action):.0%}",
-                ],
-                evidence=[event.data],
-                params=action_record.get("params", {}),
+    async def _process_alert(self, alert: Alert) -> None:
+        """Run the reactive pipeline for an alert."""
+        try:
+            await self._run_reactive_pipeline(alert)
+        except Exception:
+            logger.exception("Pipeline failed for alert %s", alert.id)
+            await self._event_bus.publish(
+                "alert.error",
+                {"alert_id": alert.id, "error": "pipeline_failure"},
             )
 
-            if decision.requires_approval:
-                self._actions_escalated += 1
-            else:
-                self._actions_auto_executed += 1
-
-    async def _process_agent_finding(self, agent_name: str, result: Any) -> None:
-        """Process an autonomous agent finding."""
-        data = result.data
-        if result.action in ("periodic_scan", "correlate", "audit"):
-            return  # Informational only
-
-        if data.get("vulnerabilities_found", 0) > 0 or data.get("threats_found", 0) > 0:
-            await self.event_bus.publish(Event(
-                event_type=EventType.THREAT_DETECTED,
-                data={**data, "source_agent": agent_name, "severity": data.get("severity", "medium")},
-                source=agent_name,
-            ))
-
-    async def _handle_red_team_result(self, event: Event) -> None:
-        """Feed red team campaign results to purple team for coverage analysis."""
-        purple = self._agents.get("purple_team")
-        if purple:
-            purple.build_coverage_matrix()
-
-    async def _handle_action_outcome(self, event: Event) -> None:
-        """Track action outcomes for self-learning."""
-        result_data = event.data.get("result", {})
-        decision_id = result_data.get("decision_id", "")
-        if not decision_id:
+    async def _run_reactive_pipeline(self, alert: Alert) -> None:
+        """Triage -> Hunt -> Respond (with Forensics in parallel)."""
+        # Step 1: Triage
+        triage_decision = await self._run_agent("triage", alert)
+        if triage_decision is None:
             return
 
-        outcome = DecisionOutcome.SUCCESS if result_data.get("success") else DecisionOutcome.FAILURE
-        await self.decision_engine.record_outcome(decision_id, outcome)
+        self._decisions[alert.id].append(triage_decision)
+        await self._event_bus.publish("alert.triaged", {
+            "alert_id": alert.id,
+            "verdict": triage_decision.reasoning_trace,
+            "confidence": triage_decision.confidence,
+        })
 
-        decision = self.decision_engine.get_decision(decision_id)
-        if decision:
-            decision.outcome = outcome
-            await self.learning.learn_from_decision(decision)
+        if triage_decision.confidence < self._confidence_threshold:
+            logger.info("Alert %s below confidence threshold, skipping", alert.id)
+            return
 
-    async def record_human_feedback(
-        self,
-        decision_id: str,
-        outcome: str,
-        notes: str = "",
-    ) -> dict[str, Any]:
-        """Human operator provides feedback on a past decision.
+        # Step 2: Threat Hunt + Forensics (parallel)
+        hunt_task = asyncio.create_task(self._run_agent("threat_hunter", alert))
+        forensic_task = asyncio.create_task(self._run_agent("forensic_analyst", alert))
 
-        Outcomes: correct, wrong, false_positive, overreaction, missed_threat
-        This feedback directly improves future autonomous decisions.
-        """
-        outcome_map = {
-            "correct": DecisionOutcome.SUCCESS,
-            "wrong": DecisionOutcome.FAILURE,
-            "false_positive": DecisionOutcome.FALSE_POSITIVE,
-            "overreaction": DecisionOutcome.OVERREACTION,
-            "missed_threat": DecisionOutcome.MISSED_THREAT,
-        }
-        outcome_enum = outcome_map.get(outcome, DecisionOutcome.FAILURE)
+        hunt_decision = await hunt_task
+        if hunt_decision:
+            self._decisions[alert.id].append(hunt_decision)
+            await self._event_bus.publish("threat.confirmed", {
+                "alert_id": alert.id,
+                "confidence": hunt_decision.confidence,
+            })
 
-        await self.decision_engine.record_outcome(decision_id, outcome_enum, notes)
+        forensic_decision = await forensic_task
+        if forensic_decision:
+            self._decisions[alert.id].append(forensic_decision)
 
-        decision = self.decision_engine.get_decision(decision_id)
-        if decision:
-            decision.outcome = outcome_enum
-            decision.outcome_notes = notes
-            insights = await self.learning.learn_from_decision(decision)
-            return {"decision_id": decision_id, "outcome": outcome, "insights": insights}
-        return {"error": "Decision not found"}
+        # Step 3: Incident Response
+        if hunt_decision and hunt_decision.confidence >= self._confidence_threshold:
+            respond_decision = await self._run_agent("incident_responder", alert)
+            if respond_decision:
+                self._decisions[alert.id].append(respond_decision)
+                for action in respond_decision.recommended_actions:
+                    if self._validate_action(action, respond_decision):
+                        if self._shadow_mode:
+                            logger.info("SHADOW MODE: Would execute %s on %s", action.get("type"), action.get("target"))
+                        else:
+                            await self._event_bus.publish("action.executed", {
+                                "alert_id": alert.id,
+                                "action": action,
+                            })
 
-    def get_status(self) -> dict[str, Any]:
-        """Return full system status including autonomy and learning metrics."""
-        status = {
-            "running": self._running,
-            "mode": "autonomous",
-            "agents": list(self._agents.keys()),
-            "adapters": list(self._adapters.keys()),
-            "cycles": self._cycle_count,
-            "events_processed": self._events_processed,
-            "actions_auto_executed": self._actions_auto_executed,
-            "actions_escalated": self._actions_escalated,
-            "pending_approvals": len(self.decision_engine.get_pending_approvals()),
-            "decision_stats": self.decision_engine.get_stats(),
-            "learning": self.learning.get_learning_report(),
-            "event_history_size": len(self.event_bus._history),
-            "attack_surface": self.asset_inventory.get_attack_surface(),
-            "playbook_stats": self.playbook_engine.get_stats(),
-        }
+        # Step 4: Compliance check (async)
+        asyncio.create_task(self._run_agent("compliance_auditor", alert))
 
-        # Add purple team coverage if available
-        purple = self._agents.get("purple_team")
-        if purple:
-            status["coverage_score"] = purple.get_coverage_score()
+    async def _run_agent(self, agent_id: str, alert: Alert) -> AgentDecision | None:
+        """Run a specific agent with semaphore control."""
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            logger.warning("Agent '%s' not registered", agent_id)
+            return None
 
-        # Plugin stats
-        status["plugins"] = self.plugin_manager.get_stats()
+        semaphore = self._semaphores.get(agent_id)
+        if semaphore is None:
+            return await agent.execute(alert)
 
-        # AI analyzer and notification stats
-        status["ai_analyzer"] = self.ai_analyzer.get_stats()
-        status["notifications"] = self.notification_manager.get_stats()
+        async with semaphore:
+            return await agent.execute(alert)
 
-        return status
+    def _check_deduplication(self, alert: Alert) -> Alert | None:
+        """Check if this alert overlaps with an existing active alert."""
+        new_iocs: set[str] = set()
+        for event in alert.events:
+            for ioc in event.iocs:
+                key = f"{ioc.type}:{ioc.value}"
+                new_iocs.add(key)
+
+        for ioc_key in new_iocs:
+            existing_alert_ids = self._dedup_index.get(ioc_key, [])
+            for alert_id in existing_alert_ids:
+                existing = self._active_alerts.get(alert_id)
+                if existing is not None:
+                    existing_iocs: set[str] = set()
+                    for event in existing.events:
+                        for ioc in event.iocs:
+                            existing_iocs.add(f"{ioc.type}:{ioc.value}")
+
+                    overlap = new_iocs & existing_iocs
+                    if len(overlap) / max(len(new_iocs), 1) > 0.5:
+                        return existing
+
+        for ioc_key in new_iocs:
+            self._dedup_index[ioc_key].append(alert.id)
+
+        return None
+
+    def _validate_action(self, action: dict[str, Any], decision: AgentDecision) -> bool:
+        """Validate an action against safety controls."""
+        action_type_str = action.get("type", "")
+        try:
+            action_type = ActionType(action_type_str)
+        except ValueError:
+            logger.warning("Invalid action type: %s", action_type_str)
+            return False
+
+        if decision.confidence < self._confidence_threshold:
+            logger.info("Action rejected: confidence %.2f < threshold %.2f", decision.confidence, self._confidence_threshold)
+            return False
+
+        if action_type in ACTION_CORROBORATION_REQUIRED:
+            if len(decision.data_sources_consulted) < 2:
+                logger.info("Action rejected: corroboration required but only %d sources", len(decision.data_sources_consulted))
+                return False
+
+        return True
+
+    def _resolve_conflict(self, decisions: list[AgentDecision]) -> AgentDecision:
+        """Resolve conflicting agent decisions using authority hierarchy."""
+        if not decisions:
+            raise ValueError("No decisions to resolve")
+
+        if len(decisions) == 1:
+            return decisions[0]
+
+        sorted_decisions = sorted(
+            decisions,
+            key=lambda d: AGENT_AUTHORITY.get(d.agent_id, 99),
+        )
+
+        return sorted_decisions[0]
+
+    @property
+    def active_alert_count(self) -> int:
+        return len(self._active_alerts)
+
+    @property
+    def queue_depth(self) -> int:
+        return self._alert_queue.qsize()

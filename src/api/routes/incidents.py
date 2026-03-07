@@ -1,66 +1,58 @@
-"""Incident management API routes."""
+"""Incident management endpoints."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
-from pydantic import BaseModel
-
-from src.core.event_bus import EventType
+from fastapi import APIRouter
 
 router = APIRouter()
 
-
-class IncidentClose(BaseModel):
-    resolution: str
+_incidents: dict[str, dict[str, Any]] = {}
 
 
-@router.get("/")
-async def list_incidents(request: Request, status: str | None = None) -> dict[str, Any]:
-    """List all incidents."""
-    event_bus = request.app.state.event_bus
-    history = event_bus.get_history(event_type=EventType.INCIDENT_CREATED, limit=500)
-    incidents = [
-        {
-            "event_id": e.event_id,
-            "timestamp": e.timestamp.isoformat(),
-            "data": e.data,
-        }
-        for e in history
-    ]
+@router.get("/incidents")
+async def list_incidents(
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List incidents with filtering."""
+    incidents = list(_incidents.values())
     if status:
-        incidents = [i for i in incidents if i["data"].get("status") == status]
-    return {"count": len(incidents), "incidents": incidents}
+        incidents = [i for i in incidents if i.get("status") == status.upper()]
+    total = len(incidents)
+    incidents = incidents[offset : offset + limit]
+    return {"incidents": incidents, "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/{incident_id}")
-async def get_incident(incident_id: str, request: Request) -> dict[str, Any]:
-    """Get incident details."""
-    brain = request.app.state.brain
-    responder = brain._agents.get("incident_responder")
-    if responder:
-        incident = responder.get_incident(incident_id)
-        if incident:
-            return {
-                "incident_id": incident.incident_id,
-                "title": incident.title,
-                "severity": incident.severity,
-                "status": incident.status,
-                "attack_type": incident.attack_type,
-                "actions_taken": incident.actions_taken,
-                "timeline": incident.timeline,
-                "created_at": incident.created_at.isoformat(),
-            }
-    return {"error": "Incident not found"}
+@router.get("/incidents/{incident_id}")
+async def get_incident(incident_id: str) -> dict:
+    """Get detailed incident with timeline."""
+    incident = _incidents.get(incident_id)
+    if incident:
+        return incident
+    return {"incident_id": incident_id, "detail": "not_found"}
 
 
-@router.post("/{incident_id}/close")
-async def close_incident(incident_id: str, body: IncidentClose, request: Request) -> dict[str, Any]:
-    """Close an incident with a resolution."""
-    brain = request.app.state.brain
-    responder = brain._agents.get("incident_responder")
-    if responder:
-        success = responder.close_incident(incident_id, body.resolution)
-        return {"success": success, "incident_id": incident_id}
-    return {"error": "Incident responder not available"}
+@router.post("/investigations")
+async def create_investigation(
+    type: str = "hunt",
+    target: str = "",
+    context: str = "",
+    priority: int = 2,
+) -> dict:
+    """Trigger a manual investigation (used by OpenClaw skills)."""
+    return {"status": "queued", "type": type, "target": target}
+
+
+@router.post("/incidents/{incident_id}/actions/{action_id}/approve")
+async def approve_action(incident_id: str, action_id: str) -> dict:
+    """Approve a pending action."""
+    return {"incident_id": incident_id, "action_id": action_id, "status": "approved"}
+
+
+@router.post("/incidents/{incident_id}/actions/{action_id}/deny")
+async def deny_action(incident_id: str, action_id: str) -> dict:
+    """Deny a pending action."""
+    return {"incident_id": incident_id, "action_id": action_id, "status": "denied"}

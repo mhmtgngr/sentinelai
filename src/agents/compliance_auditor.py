@@ -1,174 +1,140 @@
-"""Continuous compliance checking agent."""
+"""Compliance Auditor Agent — Regulatory compliance checking.
+
+Assesses security events and response actions for regulatory
+implications (GDPR, HIPAA, PCI-DSS, SOX).
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
-from src.agents.base_agent import AgentCapability, AgentResult, BaseAgent
-from src.core.event_bus import Event, EventBus, EventType
+from src.agents.base_agent import BaseAgent
+from src.core.models import AgentDecision, Alert
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class ComplianceCheck:
-    check_id: str
-    framework: str
-    control: str
-    description: str
-    severity: str = "medium"
-    check_fn_name: str = ""
-
-
-@dataclass
-class ComplianceResult:
-    check: ComplianceCheck
-    passed: bool
-    details: str = ""
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# Built-in compliance checks mapped to common frameworks
-COMPLIANCE_CHECKS: list[ComplianceCheck] = [
-    ComplianceCheck("CIS-001", "CIS", "5.1", "Ensure MFA is enabled for all admin accounts", "critical", "check_mfa_admin"),
-    ComplianceCheck("CIS-002", "CIS", "6.2", "Ensure SSH Protocol is set to 2", "high", "check_ssh_protocol"),
-    ComplianceCheck("CIS-003", "CIS", "4.1", "Ensure audit logging is enabled", "high", "check_audit_logging"),
-    ComplianceCheck("SOC2-001", "SOC2", "CC6.1", "Logical access controls are in place", "critical", "check_access_controls"),
-    ComplianceCheck("SOC2-002", "SOC2", "CC7.2", "Security events are monitored", "high", "check_monitoring"),
-    ComplianceCheck("GDPR-001", "GDPR", "Art.32", "Encryption of personal data at rest", "critical", "check_encryption"),
-    ComplianceCheck("GDPR-002", "GDPR", "Art.33", "Breach notification within 72 hours", "critical", "check_breach_notification"),
-    ComplianceCheck("PCI-001", "PCI-DSS", "Req.10", "Track and monitor all access to network resources", "critical", "check_network_monitoring"),
-]
+COMPLIANCE_FRAMEWORKS = {
+    "gdpr": {
+        "name": "GDPR",
+        "data_types": ["personal_data", "email", "user", "pii"],
+        "notification_required": True,
+        "notification_window_hours": 72,
+    },
+    "hipaa": {
+        "name": "HIPAA",
+        "data_types": ["phi", "medical", "health", "patient"],
+        "notification_required": True,
+        "notification_window_hours": 60 * 24,  # 60 days
+    },
+    "pci_dss": {
+        "name": "PCI-DSS",
+        "data_types": ["credit_card", "payment", "cardholder", "pan"],
+        "notification_required": True,
+        "notification_window_hours": 24,
+    },
+}
 
 
 class ComplianceAuditorAgent(BaseAgent):
-    """Continuously audits compliance against CIS, SOC2, GDPR, and PCI-DSS frameworks."""
+    """Compliance assessment agent.
 
-    name = "compliance_auditor"
-    capability = AgentCapability.COMPLIANCE
+    Evaluates alerts and response actions for regulatory implications.
+    """
 
-    def __init__(self, event_bus: EventBus, config: dict | None = None) -> None:
-        super().__init__(event_bus, config)
-        self._last_results: list[ComplianceResult] = []
-        self._check_registry: dict[str, ComplianceCheck] = {c.check_id: c for c in COMPLIANCE_CHECKS}
+    def __init__(
+        self,
+        frameworks: list[str] | None = None,
+        llm_client: Any = None,
+        llm_model: str = "claude-haiku-4-5-20251001",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(agent_id="compliance_auditor", timeout_seconds=180, confidence_threshold=0.70, **kwargs)
+        self._active_frameworks = frameworks or list(COMPLIANCE_FRAMEWORKS.keys())
+        self._llm_client = llm_client
+        self._llm_model = llm_model
 
-    async def process(self, event: Event) -> AgentResult:
-        """Process configuration change events to re-evaluate compliance."""
-        data = event.data
-        affected_checks = self._find_affected_checks(data)
-        results = []
+    @property
+    def capabilities(self) -> list[str]:
+        return ["audit", "compliance_check", "report"]
 
-        for check in affected_checks:
-            passed = self._evaluate_check(check, data)
-            result = ComplianceResult(check=check, passed=passed, details=str(data))
-            results.append(result)
+    async def process(self, alert: Alert) -> AgentDecision:
+        """Assess compliance implications of an alert."""
+        applicable_frameworks = self._identify_frameworks(alert)
+        compliance_issues = self._check_compliance(alert, applicable_frameworks)
 
-            if not passed:
-                await self.event_bus.publish(Event(
-                    event_type=EventType.ALERT_RECEIVED,
-                    data={
-                        "type": "compliance_violation",
-                        "check_id": check.check_id,
-                        "framework": check.framework,
-                        "control": check.control,
-                        "severity": check.severity,
-                        "description": check.description,
-                    },
-                    source=self.name,
-                ))
-
-        return AgentResult(
-            agent_name=self.name,
-            action="compliance_check",
-            success=True,
-            data={
-                "checks_run": len(results),
-                "passed": sum(1 for r in results if r.passed),
-                "failed": sum(1 for r in results if not r.passed),
-            },
+        return AgentDecision(
+            agent_id=self.agent_id,
+            alert_id=alert.id,
+            confidence=0.85 if compliance_issues else 0.90,
+            reasoning_trace=[
+                f"Checked frameworks: {[f['name'] for f in applicable_frameworks]}",
+                f"Issues found: {len(compliance_issues)}",
+                *[f"Issue: {issue}" for issue in compliance_issues],
+            ],
+            recommended_actions=[
+                {"type": "CREATE_ALERT", "target": "compliance_team", "reason": issue}
+                for issue in compliance_issues
+            ],
+            data_sources_consulted=["compliance_rules", "alert_data"],
         )
 
-    async def run_autonomous(self) -> list[AgentResult]:
-        """Run all compliance checks periodically."""
-        results: list[ComplianceResult] = []
+    def _identify_frameworks(self, alert: Alert) -> list[dict[str, Any]]:
+        """Identify which compliance frameworks apply to this alert."""
+        applicable = []
+        all_text = " ".join(
+            str(e.raw_payload) + " " + str(e.normalized)
+            for e in alert.events
+        ).lower()
 
-        for check in COMPLIANCE_CHECKS:
-            passed = self._evaluate_check(check, {})
-            results.append(ComplianceResult(check=check, passed=passed))
+        for framework_id in self._active_frameworks:
+            framework = COMPLIANCE_FRAMEWORKS.get(framework_id)
+            if framework is None:
+                continue
+            for data_type in framework["data_types"]:
+                if data_type in all_text:
+                    applicable.append(framework)
+                    break
 
-        self._last_results = results
-        failed = [r for r in results if not r.passed]
+        return applicable
 
-        return [AgentResult(
-            agent_name=self.name,
-            action="full_audit",
-            success=True,
-            data={
-                "total_checks": len(results),
-                "passed": len(results) - len(failed),
-                "failed": len(failed),
-                "violations": [
-                    {
-                        "check_id": r.check.check_id,
-                        "framework": r.check.framework,
-                        "control": r.check.control,
-                        "severity": r.check.severity,
-                    }
-                    for r in failed
-                ],
-            },
-        )]
+    def _check_compliance(self, alert: Alert, frameworks: list[dict[str, Any]]) -> list[str]:
+        """Check for compliance violations."""
+        issues = []
+        for framework in frameworks:
+            if framework.get("notification_required"):
+                window = framework.get("notification_window_hours", 72)
+                issues.append(
+                    f"{framework['name']}: Data breach notification may be required "
+                    f"within {window} hours"
+                )
 
-    def _find_affected_checks(self, data: dict) -> list[ComplianceCheck]:
-        """Determine which compliance checks are relevant to a change event."""
-        change_type = data.get("change_type", "")
-        affected = []
-        mapping = {
-            "authentication": ["CIS-001", "SOC2-001"],
-            "ssh": ["CIS-002"],
-            "logging": ["CIS-003", "PCI-001", "SOC2-002"],
-            "encryption": ["GDPR-001"],
-            "access_control": ["SOC2-001"],
-            "monitoring": ["SOC2-002", "PCI-001"],
-        }
-        for keyword, check_ids in mapping.items():
-            if keyword in change_type.lower():
-                for cid in check_ids:
-                    if cid in self._check_registry:
-                        affected.append(self._check_registry[cid])
-        return affected or list(self._check_registry.values())
+        has_data_exfil = any(
+            "exfiltration" in e.event_type.lower() or "data_leak" in e.event_type.lower()
+            for e in alert.events
+        )
+        if has_data_exfil and frameworks:
+            issues.append("Potential data exfiltration detected — regulatory notification likely required")
 
-    def _evaluate_check(self, check: ComplianceCheck, context: dict) -> bool:
-        """Evaluate a single compliance check. In production, queries adapters for real state."""
-        # Framework for check evaluation - returns True (pass) by default.
-        # Real implementation would query security product APIs.
-        return True
+        return issues
 
-    def get_compliance_report(self, framework: str | None = None) -> dict[str, Any]:
-        """Generate a compliance report from last audit results."""
-        results = self._last_results
-        if framework:
-            results = [r for r in results if r.check.framework == framework]
+    async def scheduled_audit(self, adapter_registry: Any = None) -> AgentDecision:
+        """Run a scheduled compliance configuration audit."""
+        findings: list[str] = []
 
-        passed = sum(1 for r in results if r.passed)
-        total = len(results)
+        if adapter_registry:
+            health = await adapter_registry.health_check_all()
+            for adapter_id, status in health.items():
+                if status.state.value != "HEALTHY":
+                    findings.append(f"Adapter '{adapter_id}' is {status.state.value} — may affect compliance monitoring")
 
-        return {
-            "framework": framework or "all",
-            "total_checks": total,
-            "passed": passed,
-            "failed": total - passed,
-            "compliance_score": (passed / total * 100) if total > 0 else 0,
-            "details": [
-                {
-                    "check_id": r.check.check_id,
-                    "control": r.check.control,
-                    "description": r.check.description,
-                    "passed": r.passed,
-                }
-                for r in results
+        return AgentDecision(
+            agent_id=self.agent_id,
+            confidence=0.90,
+            reasoning_trace=[
+                "Scheduled compliance audit",
+                f"Findings: {len(findings)}",
+                *findings,
             ],
-        }
+            data_sources_consulted=["adapter_health", "compliance_rules"],
+        )

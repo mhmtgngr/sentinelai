@@ -1,88 +1,43 @@
-# Sentinel-AI Agent Configuration
+# Agent configuration for SENTINEL-AI
 
-agents:
-  triage:
-    enabled: true
-    # Patterns to automatically mark as false positive
-    false_positive_patterns:
-      - "health check"
-      - "monitoring probe"
-      - "scheduled backup"
-    # Severity threshold for auto-escalation
-    escalation_threshold: 75
+triage:
+  enabled: true
+  auto_classify: true
+  confidence_threshold: 0.7
+  severity_escalation: true
 
-  threat_hunter:
-    enabled: true
-    # How often to run proactive hunts (in heartbeats)
-    hunt_frequency: 5
-    # Enable/disable specific hunting hypotheses
-    enabled_hypotheses:
-      - TH001  # Unusual outbound connections
-      - TH002  # Credential dumping indicators
-      - TH003  # Living off the land binaries
-      - TH004  # DNS tunneling
-      - TH005  # Lateral movement patterns
+soar:
+  enabled: true
+  auto_remediate_severity:
+    - low
+    - medium
+  require_approval_severity:
+    - high
+    - critical
+  max_concurrent_actions: 5
 
-  incident_responder:
-    enabled: true
-    # Require human approval for critical actions
-    require_approval_for:
-      - isolate_host
-      - disable_user
-      - reset_credentials
-    # Auto-approve low-risk actions
-    auto_approve_severity: ["low", "medium"]
+education:
+  enabled: true
+  auto_send_for_severity:
+    - low
+    - medium
+  require_approval_for_severity:
+    - high
+    - critical
+  cooldown_hours: 72  # Don't re-educate same user on same topic within this window
 
-  compliance_auditor:
-    enabled: true
-    # Frameworks to audit
-    frameworks:
-      - CIS
-      - SOC2
-      - GDPR
-      - PCI-DSS
-    # Audit frequency (in heartbeats)
-    audit_frequency: 60
+teams:
+  enabled: true
+  decision_timeout_minutes: 30
+  auto_escalate_on_timeout: true
+  notification_severity:
+    - medium
+    - high
+    - critical
 
-  forensic_analyst:
-    enabled: true
-    # Maximum concurrent investigations
-    max_concurrent_cases: 10
-
-  vuln_scanner:
-    enabled: true
-    # Scan frequency (in heartbeats)
-    scan_frequency: 30
-    # Vulnerability check categories
-    enabled_checks:
-      - VS-001  # Outdated SSL/TLS
-      - VS-002  # Default credentials
-      - VS-003  # Open management ports
-      - VS-004  # Missing patches
-      - VS-005  # Weak authentication
-      - VS-006  # Misconfigured CORS
-      - VS-007  # Exposed sensitive endpoints
-
-  red_team:
-    enabled: true
-    # Auto-run scheduled campaigns (requires human approval via decision engine)
-    auto_schedule: false
-    # Default target scope for simulations
-    default_scope:
-      target_ip: "10.0.0.0/24"
-      target_host: "LAB-WORKSTATION"
-    # Technique packs to load (from config/techniques/)
-    technique_pack_dirs:
-      - config/techniques
-
-  purple_team:
-    enabled: true
-    # How often to rebuild coverage matrix (in heartbeats)
-    coverage_frequency: 20
-    # Priority techniques to always test
-    priority_techniques:
-      - T1566.001  # Spearphishing Attachment
-      - T1059.001  # PowerShell
-      - T1078      # Valid Accounts
-      - T1003.001  # LSASS Memory
-      - T1486      # Ransomware
+email:
+  enabled: true
+  alert_notification_severity:
+    - high
+    - critical
+  education_enabled: true

@@ -1,23 +1,19 @@
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
 FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY src/ ./src/
+COPY config/ ./config/
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir . 2>/dev/null || pip install --no-cache-dir \
-    fastapi uvicorn[standard] pydantic pydantic-settings httpx \
-    chromadb numpy scikit-learn pyyaml structlog websockets \
-    aiofiles python-dateutil jinja2
+EXPOSE 8000
 
-COPY src/ src/
-COPY config/ config/
-
-EXPOSE 8080
-
-ENV PYTHONPATH=/app
-ENV LOG_LEVEL=INFO
-
-CMD ["python", "-m", "src.main"]
+CMD ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8000"]

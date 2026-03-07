@@ -1,189 +1,201 @@
-"""Automated incident response agent."""
+"""Incident Responder Agent — Automated incident response.
+
+Selects and executes response playbooks based on threat assessment.
+Validates actions against confidence thresholds and blast radius limits.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from src.agents.base_agent import AgentCapability, AgentResult, BaseAgent
-from src.core.event_bus import Event, EventBus, EventType
+import yaml
+
+from src.agents.base_agent import BaseAgent
+from src.core.models import (
+    ActionResult,
+    ActionStatus,
+    ActionType,
+    AgentDecision,
+    Alert,
+)
 
 logger = logging.getLogger(__name__)
 
+RESPOND_SYSTEM_PROMPT = """You are an incident responder. Based on the threat assessment, determine the appropriate response actions.
 
-@dataclass
-class Incident:
-    incident_id: str = field(default_factory=lambda: str(uuid4()))
-    title: str = ""
-    severity: str = "medium"
-    status: str = "open"
-    attack_type: str = "unknown"
-    source_events: list[str] = field(default_factory=list)
-    actions_taken: list[dict[str, Any]] = field(default_factory=list)
-    timeline: list[dict[str, Any]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+Consider:
+- Severity and confidence of the threat
+- Blast radius of proposed actions
+- Available rollback procedures
+- Whether human approval is required
 
-
-# Response playbook definitions
-PLAYBOOKS = {
-    "brute_force": [
-        {"action": "block_ip", "params": {"duration": 3600}, "severity_threshold": "medium"},
-        {"action": "reset_credentials", "params": {}, "severity_threshold": "high"},
-        {"action": "notify_soc", "params": {"channel": "slack"}, "severity_threshold": "low"},
-    ],
-    "malware": [
-        {"action": "isolate_host", "params": {}, "severity_threshold": "medium"},
-        {"action": "collect_forensics", "params": {}, "severity_threshold": "medium"},
-        {"action": "block_ip", "params": {"duration": 86400}, "severity_threshold": "low"},
-        {"action": "notify_soc", "params": {"channel": "slack", "priority": "high"}, "severity_threshold": "low"},
-    ],
-    "data_exfiltration": [
-        {"action": "block_ip", "params": {"duration": 86400}, "severity_threshold": "low"},
-        {"action": "isolate_host", "params": {}, "severity_threshold": "medium"},
-        {"action": "notify_soc", "params": {"channel": "slack", "priority": "critical"}, "severity_threshold": "low"},
-    ],
-    "lateral_movement": [
-        {"action": "isolate_host", "params": {}, "severity_threshold": "medium"},
-        {"action": "revoke_sessions", "params": {}, "severity_threshold": "medium"},
-        {"action": "notify_soc", "params": {"channel": "slack", "priority": "high"}, "severity_threshold": "low"},
-    ],
-    "default": [
-        {"action": "notify_soc", "params": {"channel": "slack"}, "severity_threshold": "low"},
-    ],
-}
-
-SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+Respond in JSON format:
+- confidence: float 0.0-1.0
+- actions: list of objects with "type" (BLOCK_IP, DISABLE_ACCOUNT, ISOLATE_HOST, FORCE_PASSWORD_RESET, QUARANTINE_FILE, ADD_TO_WATCHLIST), "target", "reason", "rollback_procedure"
+- requires_human_approval: boolean
+- reasoning: list of analysis steps
+"""
 
 
 class IncidentResponderAgent(BaseAgent):
-    """Automates incident response using playbook-driven actions."""
+    """Automated incident response agent.
 
-    name = "incident_responder"
-    capability = AgentCapability.INCIDENT_RESPONSE
+    Selects playbooks, refines actions with LLM context,
+    and validates against safety controls before execution.
+    """
 
-    def __init__(self, event_bus: EventBus, config: dict | None = None) -> None:
-        super().__init__(event_bus, config)
-        self._incidents: dict[str, Incident] = {}
+    def __init__(
+        self,
+        playbook_dir: Path | str = "config/playbooks",
+        llm_client: Any = None,
+        llm_model: str = "claude-sonnet-4-6",
+        max_blast_radius: int = 5,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(agent_id="incident_responder", timeout_seconds=60, confidence_threshold=0.85, **kwargs)
+        self._playbook_dir = Path(playbook_dir)
+        self._llm_client = llm_client
+        self._llm_model = llm_model
+        self._max_blast_radius = max_blast_radius
 
-    async def process(self, event: Event) -> AgentResult:
-        """Create or update an incident from a threat event and execute playbook."""
-        data = event.data
-        attack_type = data.get("attack_type", data.get("type", "unknown"))
-        severity = data.get("severity", "medium")
+    @property
+    def capabilities(self) -> list[str]:
+        return ["respond", "remediate", "rollback"]
 
-        # Create incident
-        incident = Incident(
-            title=f"{attack_type} detected from {data.get('source_ip', 'unknown')}",
-            severity=severity,
-            attack_type=attack_type,
-            source_events=[event.event_id],
+    async def process(self, alert: Alert) -> AgentDecision:
+        """Determine and validate response actions for an alert."""
+        playbook = self._select_playbook(alert)
+
+        if self._llm_client is not None:
+            prompt = self._build_response_prompt(alert, playbook)
+            response = await self._call_llm(prompt)
+            decision = self._parse_response(alert, response)
+        else:
+            decision = self._rule_based_response(alert, playbook)
+
+        decision.recommended_actions = self._validate_actions(decision.recommended_actions)
+        return decision
+
+    def _select_playbook(self, alert: Alert) -> dict[str, Any]:
+        """Select the appropriate response playbook based on alert type."""
+        if not self._playbook_dir.exists():
+            return {}
+
+        best_match: dict[str, Any] = {}
+        event_types = {e.event_type for e in alert.events}
+        mitre_techniques: set[str] = set()
+        for event in alert.events:
+            mitre_techniques.update(event.mitre_attack)
+
+        for playbook_file in self._playbook_dir.glob("*.yml"):
+            try:
+                with open(playbook_file) as f:
+                    playbook = yaml.safe_load(f) or {}
+                triggers = playbook.get("triggers", [])
+                for trigger in triggers:
+                    if trigger.get("alert_type") in event_types:
+                        return playbook
+                    if trigger.get("sigma_rule") in mitre_techniques:
+                        best_match = playbook
+            except Exception:
+                continue
+
+        return best_match
+
+    def _build_response_prompt(self, alert: Alert, playbook: dict[str, Any]) -> str:
+        parts = [RESPOND_SYSTEM_PROMPT, "\n## Threat Assessment\n"]
+
+        for event in alert.events[:5]:
+            parts.append(f"- Type: {event.event_type}, Severity: {event.severity.value}")
+            parts.append(f"  Assets: {event.affected_assets}")
+            parts.append(f"  IOCs: {[i.value for i in event.iocs]}")
+
+        if playbook:
+            parts.append(f"\n## Selected Playbook: {playbook.get('name', 'unknown')}\n")
+            for step in playbook.get("steps", [])[:5]:
+                parts.append(f"- {step.get('name', 'step')}: {step.get('action', 'N/A')}")
+
+        parts.append(f"\n## Safety Constraints\n")
+        parts.append(f"- Max blast radius: {self._max_blast_radius} assets")
+        parts.append(f"- Confidence threshold: {self.confidence_threshold}")
+
+        return "\n".join(parts)
+
+    async def _call_llm(self, prompt: str) -> str:
+        response = await self._llm_client.messages.create(
+            model=self._llm_model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
         )
-        incident.timeline.append({
-            "time": datetime.now(timezone.utc).isoformat(),
-            "action": "incident_created",
-            "details": data,
-        })
-        self._incidents[incident.incident_id] = incident
+        return response.content[0].text
 
-        await self.event_bus.publish(Event(
-            event_type=EventType.INCIDENT_CREATED,
-            data={
-                "incident_id": incident.incident_id,
-                "title": incident.title,
-                "severity": incident.severity,
-            },
-            source=self.name,
-        ))
+    def _parse_response(self, alert: Alert, response: str) -> AgentDecision:
+        try:
+            text = response.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            data = json.loads(text)
 
-        # Execute playbook
-        actions_executed = await self._execute_playbook(incident)
-
-        return AgentResult(
-            agent_name=self.name,
-            action="respond",
-            success=True,
-            data={
-                "incident_id": incident.incident_id,
-                "actions_executed": actions_executed,
-                "severity": severity,
-            },
-        )
-
-    async def run_autonomous(self) -> list[AgentResult]:
-        """Check open incidents for staleness and escalate if needed."""
-        results = []
-        for incident in self._incidents.values():
-            if incident.status == "open":
-                age = (datetime.now(timezone.utc) - incident.created_at).total_seconds()
-                if age > 3600 and incident.severity in ("high", "critical"):
-                    incident.timeline.append({
-                        "time": datetime.now(timezone.utc).isoformat(),
-                        "action": "auto_escalated",
-                        "details": "Open critical incident older than 1 hour",
-                    })
-                    results.append(AgentResult(
-                        agent_name=self.name,
-                        action="escalate",
-                        success=True,
-                        data={"incident_id": incident.incident_id},
-                    ))
-        return results
-
-    async def _execute_playbook(self, incident: Incident) -> list[dict]:
-        playbook = PLAYBOOKS.get(incident.attack_type, PLAYBOOKS["default"])
-        executed = []
-
-        for step in playbook:
-            if SEVERITY_ORDER.get(incident.severity, 0) >= SEVERITY_ORDER.get(step["severity_threshold"], 0):
-                action_record = {
-                    "action": step["action"],
-                    "params": step["params"],
-                    "status": "requested",
-                }
-                incident.actions_taken.append(action_record)
-                incident.timeline.append({
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "action": step["action"],
-                    "details": step["params"],
+            actions = []
+            for action in data.get("actions", []):
+                actions.append({
+                    "type": action.get("type", "ADD_TO_WATCHLIST"),
+                    "target": action.get("target", ""),
+                    "reason": action.get("reason", ""),
+                    "rollback_procedure": action.get("rollback_procedure", ""),
                 })
 
-                # Request action execution
-                await self.event_bus.publish(Event(
-                    event_type=EventType.ACTION_REQUESTED,
-                    data={
-                        "action": step["action"],
-                        "params": step["params"],
-                        "incident_id": incident.incident_id,
-                        "severity": incident.severity,
-                    },
-                    source=self.name,
-                ))
-                executed.append(action_record)
+            return AgentDecision(
+                agent_id=self.agent_id,
+                alert_id=alert.id,
+                confidence=min(max(float(data.get("confidence", 0.5)), 0.0), 1.0),
+                reasoning_trace=data.get("reasoning", []),
+                recommended_actions=actions,
+                data_sources_consulted=["playbook", "llm"],
+            )
+        except (json.JSONDecodeError, KeyError):
+            return self._rule_based_response(alert, {})
 
-        return executed
+    def _rule_based_response(self, alert: Alert, playbook: dict[str, Any]) -> AgentDecision:
+        """Fallback response when LLM is unavailable."""
+        actions = []
+        for event in alert.events:
+            for ioc in event.iocs:
+                if ioc.type == "ip":
+                    actions.append({
+                        "type": "BLOCK_IP",
+                        "target": ioc.value,
+                        "reason": f"IOC from {event.event_type}",
+                        "rollback_procedure": f"Unblock IP {ioc.value}",
+                    })
 
-    def get_incident(self, incident_id: str) -> Incident | None:
-        return self._incidents.get(incident_id)
+        return AgentDecision(
+            agent_id=self.agent_id,
+            alert_id=alert.id,
+            confidence=0.6,
+            reasoning_trace=["Rule-based response (LLM unavailable)"],
+            recommended_actions=actions[:self._max_blast_radius],
+            data_sources_consulted=["sigma_rules"],
+        )
 
-    def list_incidents(self, status: str | None = None) -> list[Incident]:
-        incidents = list(self._incidents.values())
-        if status:
-            incidents = [i for i in incidents if i.status == status]
-        return incidents
+    def _validate_actions(self, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Validate actions against blast radius and safety constraints."""
+        if len(actions) > self._max_blast_radius:
+            logger.warning(
+                "Actions exceed blast radius limit (%d > %d), truncating",
+                len(actions), self._max_blast_radius,
+            )
+            actions = actions[:self._max_blast_radius]
 
-    def close_incident(self, incident_id: str, resolution: str) -> bool:
-        incident = self._incidents.get(incident_id)
-        if not incident:
-            return False
-        incident.status = "closed"
-        incident.updated_at = datetime.now(timezone.utc)
-        incident.timeline.append({
-            "time": datetime.now(timezone.utc).isoformat(),
-            "action": "incident_closed",
-            "details": resolution,
-        })
-        return True
+        valid_types = {at.value for at in ActionType}
+        validated = []
+        for action in actions:
+            if action.get("type") in valid_types:
+                validated.append(action)
+            else:
+                logger.warning("Invalid action type '%s' rejected", action.get("type"))
+
+        return validated

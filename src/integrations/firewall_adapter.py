@@ -1,96 +1,173 @@
-"""Firewall adapter — Palo Alto Networks."""
+"""Firewall Adapter — Palo Alto PAN-OS integration.
+
+Provides event ingestion and action execution against PAN-OS firewalls.
+"""
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
+import logging
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from src.integrations.base_adapter import ActionResult, BaseSecurityAdapter, HealthStatus
+from src.core.models import (
+    ActionResult,
+    ActionStatus,
+    ActionType,
+    HealthState,
+    HealthStatus,
+    SecurityEvent,
+    Severity,
+)
+from src.integrations.base_adapter import BaseSecurityAdapter
+
+logger = logging.getLogger(__name__)
 
 
-class PaloAltoAdapter(BaseSecurityAdapter):
+class FirewallAdapter(BaseSecurityAdapter):
+    """Palo Alto PAN-OS firewall adapter."""
+
     product_type = "firewall"
     vendor = "paloalto"
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
-        self._api_key = config.get("api_key") or os.getenv("PALOALTO_API_KEY", "")
-        self._client: httpx.AsyncClient | None = None
-
-    async def _authenticate(self) -> None:
+    def __init__(self, endpoint: str, api_key: str = "", **kwargs: Any) -> None:
+        super().__init__(endpoint, **kwargs)
+        self._api_key = api_key
         self._client = httpx.AsyncClient(
-            base_url=self.endpoint,
-            headers={"X-PAN-KEY": self._api_key},
-            verify=self.config.get("verify_ssl", True),
+            base_url=endpoint,
+            headers={"X-PAN-KEY": api_key},
+            verify=False,
             timeout=30.0,
         )
 
-    async def get_events(self, since: datetime | None = None) -> list[dict[str, Any]]:
-        if not self._client:
-            return []
-        try:
-            params = {"type": "log", "log-type": "threat"}
-            if since:
-                params["query"] = f"(receive_time geq '{since.strftime('%Y/%m/%d %H:%M:%S')}')"
-            resp = await self._client.get("/api/", params=params)
-            resp.raise_for_status()
-            return self._parse_threat_logs(resp.json())
-        except Exception:
-            self.logger.exception("Error fetching PaloAlto events")
-            return []
+    async def get_events(self, since: datetime) -> list[SecurityEvent]:
+        """Poll PAN-OS for traffic and threat logs."""
+        params = {
+            "type": "log",
+            "log-type": "threat",
+            "query": f"(receive_time geq '{since.strftime('%Y/%m/%d %H:%M:%S')}')",
+        }
 
-    async def health_check(self) -> HealthStatus:
-        if not self._client:
-            return HealthStatus.UNHEALTHY
-        try:
-            resp = await self._client.get("/api/", params={"type": "op", "cmd": "<show><system><info></info></system></show>"})
-            return HealthStatus.HEALTHY if resp.status_code == 200 else HealthStatus.DEGRADED
-        except Exception:
-            return HealthStatus.UNHEALTHY
+        response = await self._client.get("/api/", params=params)
+        response.raise_for_status()
 
-    async def block_ip(self, ip: str, reason: str) -> ActionResult:
-        """Block an IP address via dynamic address group."""
-        if not self._client:
-            return ActionResult(success=False, action="block_ip", message="Not connected")
-        try:
-            # Register IP as a tag in DAG
-            payload = {
-                "type": "user-id",
-                "cmd": f"<uid-message><payload><register><entry ip=\"{ip}\"><tag><member>sentinel-blocked</member></tag></entry></register></payload></uid-message>",
-            }
-            resp = await self._client.post("/api/", data=payload)
-            return ActionResult(
-                success=resp.status_code == 200,
-                action="block_ip",
-                message=f"Blocked {ip}: {reason}",
-                data={"ip": ip},
-            )
-        except Exception as e:
-            return ActionResult(success=False, action="block_ip", message=str(e))
-
-    def _parse_threat_logs(self, data: dict) -> list[dict[str, Any]]:
-        events = []
-        logs = data.get("response", {}).get("result", {}).get("log", {}).get("logs", {}).get("entry", [])
-        if isinstance(logs, dict):
-            logs = [logs]
-        for log in logs:
-            events.append(self._build_event(
-                log,
-                event_type="threat",
-                severity=self._map_severity(log.get("severity", "")),
-                description=log.get("threatid", ""),
-                source_ip=log.get("src", ""),
-                destination_ip=log.get("dst", ""),
-                rule_name=log.get("rule", ""),
+        events: list[SecurityEvent] = []
+        for entry in self._parse_panos_response(response.text):
+            events.append(SecurityEvent(
+                source_adapter=f"{self.product_type}/{self.vendor}",
+                event_type=entry.get("type", "threat"),
+                severity=self._map_severity(entry.get("severity", "low")),
+                raw_payload=entry,
+                normalized={
+                    "source_ip": entry.get("src"),
+                    "destination_ip": entry.get("dst"),
+                    "application": entry.get("app"),
+                    "action": entry.get("action"),
+                },
+                affected_assets=[
+                    a for a in [entry.get("src"), entry.get("dst")] if a
+                ],
             ))
+
         return events
 
+    async def execute_action(
+        self, action_type: ActionType, target: str, params: dict[str, Any] | None = None
+    ) -> ActionResult:
+        """Execute a firewall action (block/unblock IP)."""
+        if action_type == ActionType.BLOCK_IP:
+            return await self._block_ip(target)
+        elif action_type == ActionType.UNBLOCK_IP:
+            return await self._unblock_ip(target)
+
+        return ActionResult(
+            action_type=action_type,
+            target=target,
+            status=ActionStatus.FAILED,
+            adapter_used=f"{self.product_type}/{self.vendor}",
+            evidence={"error": f"Unsupported action: {action_type.value}"},
+        )
+
+    async def _block_ip(self, ip: str) -> ActionResult:
+        """Add an IP to the block list via PAN-OS API."""
+        request_params = {
+            "type": "config",
+            "action": "set",
+            "xpath": f"/config/devices/entry/vsys/entry/address/entry[@name='blocked-{ip}']",
+            "element": f"<ip-netmask>{ip}/32</ip-netmask>",
+        }
+
+        try:
+            response = await self._client.post("/api/", params=request_params)
+            response.raise_for_status()
+
+            return ActionResult(
+                action_type=ActionType.BLOCK_IP,
+                target=ip,
+                status=ActionStatus.SUCCESS,
+                adapter_used=f"{self.product_type}/{self.vendor}",
+                rollback_capable=True,
+                rollback_procedure=f"Remove address object 'blocked-{ip}' from firewall",
+                executed_at=datetime.utcnow(),
+            )
+        except httpx.HTTPError as e:
+            return ActionResult(
+                action_type=ActionType.BLOCK_IP,
+                target=ip,
+                status=ActionStatus.FAILED,
+                adapter_used=f"{self.product_type}/{self.vendor}",
+                evidence={"error": str(e)},
+            )
+
+    async def _unblock_ip(self, ip: str) -> ActionResult:
+        """Remove an IP from the block list."""
+        request_params = {
+            "type": "config",
+            "action": "delete",
+            "xpath": f"/config/devices/entry/vsys/entry/address/entry[@name='blocked-{ip}']",
+        }
+
+        try:
+            response = await self._client.post("/api/", params=request_params)
+            response.raise_for_status()
+
+            return ActionResult(
+                action_type=ActionType.UNBLOCK_IP,
+                target=ip,
+                status=ActionStatus.SUCCESS,
+                adapter_used=f"{self.product_type}/{self.vendor}",
+                executed_at=datetime.utcnow(),
+            )
+        except httpx.HTTPError as e:
+            return ActionResult(
+                action_type=ActionType.UNBLOCK_IP,
+                target=ip,
+                status=ActionStatus.FAILED,
+                evidence={"error": str(e)},
+            )
+
+    async def health_check(self) -> HealthStatus:
+        """Check PAN-OS API connectivity."""
+        try:
+            response = await self._client.get("/api/", params={"type": "version"})
+            response.raise_for_status()
+            return HealthStatus(state=HealthState.HEALTHY, message="PAN-OS API reachable")
+        except Exception as e:
+            return HealthStatus(state=HealthState.UNAVAILABLE, message=str(e))
+
+    def _parse_panos_response(self, xml_text: str) -> list[dict[str, Any]]:
+        """Parse PAN-OS XML response into list of dicts (simplified)."""
+        # In production, use proper XML parsing
+        return []
+
     @staticmethod
-    def _map_severity(pan_severity: str) -> str:
-        mapping = {"critical": "critical", "high": "high", "medium": "medium", "low": "low", "informational": "info"}
-        return mapping.get(pan_severity.lower(), "info")
-
-
+    def _map_severity(panos_severity: str) -> Severity:
+        mapping = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+            "informational": Severity.INFO,
+        }
+        return mapping.get(panos_severity.lower(), Severity.MEDIUM)

@@ -1,125 +1,111 @@
-"""Internal event pub/sub system for Sentinel-AI."""
+"""In-process async event bus for Sentinel-AI.
+
+Topic-based pub/sub using asyncio queues.
+Phase 2 will replace this with Redis Streams or NATS JetStream.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import datetime
 from typing import Any, Callable, Coroutine
-from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
-
-class EventType(str, Enum):
-    # Alert lifecycle
-    ALERT_RECEIVED = "alert.received"
-    ALERT_TRIAGED = "alert.triaged"
-    ALERT_ESCALATED = "alert.escalated"
-    ALERT_RESOLVED = "alert.resolved"
-    ALERT_FALSE_POSITIVE = "alert.false_positive"
-
-    # Incident lifecycle
-    INCIDENT_CREATED = "incident.created"
-    INCIDENT_UPDATED = "incident.updated"
-    INCIDENT_CLOSED = "incident.closed"
-
-    # Threat hunting
-    THREAT_DETECTED = "threat.detected"
-    THREAT_HUNT_STARTED = "threat.hunt.started"
-    THREAT_HUNT_COMPLETED = "threat.hunt.completed"
-
-    # Response actions
-    ACTION_REQUESTED = "action.requested"
-    ACTION_APPROVED = "action.approved"
-    ACTION_EXECUTED = "action.executed"
-    ACTION_FAILED = "action.failed"
-
-    # System
-    HEARTBEAT = "system.heartbeat"
-    ADAPTER_CONNECTED = "adapter.connected"
-    ADAPTER_DISCONNECTED = "adapter.disconnected"
-    ANOMALY_DETECTED = "anomaly.detected"
-
-    # Learning
-    FEEDBACK_RECEIVED = "learning.feedback"
-    MODEL_UPDATED = "learning.model_updated"
-
-    # Red team
-    RED_TEAM_SIMULATION = "red_team.simulation"
-    RED_TEAM_CAMPAIGN_STARTED = "red_team.campaign.started"
-    RED_TEAM_CAMPAIGN_COMPLETED = "red_team.campaign.completed"
-
-    # Purple team
-    PURPLE_TEAM_EXERCISE = "purple_team.exercise"
-    COVERAGE_GAP_DETECTED = "purple_team.coverage_gap"
-
-    # Playbook / SOAR
-    PLAYBOOK_EXECUTED = "playbook.executed"
-    PLAYBOOK_STEP_COMPLETED = "playbook.step_completed"
-
-    # Asset management
-    ASSET_DISCOVERED = "asset.discovered"
-    ATTACK_SURFACE_CHANGED = "asset.surface_changed"
+Subscriber = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 @dataclass
 class Event:
-    event_type: EventType
-    data: dict[str, Any] = field(default_factory=dict)
-    source: str = ""
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    """An event published to the bus."""
 
-
-Callback = Callable[[Event], Coroutine[Any, Any, None]]
+    topic: str
+    data: dict[str, Any]
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    correlation_id: str = ""
 
 
 class EventBus:
-    """Async pub/sub event bus for internal communication between agents and components."""
+    """In-process async event bus with topic-based pub/sub.
 
-    def __init__(self) -> None:
-        self._subscribers: dict[EventType, list[Callback]] = {}
-        self._history: list[Event] = []
-        self._max_history = 10_000
+    Topics:
+        alert.new, alert.triaged, threat.confirmed,
+        incident.created, action.executed, action.pending_approval,
+        adapter.health, investigation.requested
+    """
 
-    def subscribe(self, event_type: EventType, callback: Callback) -> None:
-        if event_type not in self._subscribers:
-            self._subscribers[event_type] = []
-        self._subscribers[event_type].append(callback)
+    def __init__(self, max_queue_size: int = 10000) -> None:
+        self._subscribers: dict[str, list[Subscriber]] = defaultdict(list)
+        self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
+        self._running = False
+        self._task: asyncio.Task[None] | None = None
 
-    def unsubscribe(self, event_type: EventType, callback: Callback) -> None:
-        if event_type in self._subscribers:
-            self._subscribers[event_type] = [
-                cb for cb in self._subscribers[event_type] if cb != callback
-            ]
+    def subscribe(self, topic: str, callback: Subscriber) -> None:
+        """Register a callback for a topic."""
+        self._subscribers[topic].append(callback)
+        logger.debug("Subscriber registered for topic '%s'", topic)
 
-    async def publish(self, event: Event) -> None:
-        self._history.append(event)
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+    def unsubscribe(self, topic: str, callback: Subscriber) -> None:
+        """Remove a callback from a topic."""
+        if callback in self._subscribers[topic]:
+            self._subscribers[topic].remove(callback)
 
-        callbacks = self._subscribers.get(event.event_type, [])
-        if not callbacks:
-            return
+    async def publish(self, topic: str, data: dict[str, Any], correlation_id: str = "") -> None:
+        """Publish an event to a topic."""
+        event = Event(topic=topic, data=data, correlation_id=correlation_id)
+        await self._queue.put(event)
+        logger.debug("Event published to '%s' (queue depth: %d)", topic, self._queue.qsize())
 
-        tasks = [asyncio.create_task(self._safe_call(cb, event)) for cb in callbacks]
-        await asyncio.gather(*tasks, return_exceptions=True)
+    async def start(self) -> None:
+        """Start the event bus consumer loop."""
+        self._running = True
+        self._task = asyncio.create_task(self._consume())
+        logger.info("Event bus started")
 
-    async def _safe_call(self, callback: Callback, event: Event) -> None:
-        try:
-            await callback(event)
-        except Exception:
-            logger.exception("Error in event handler for %s", event.event_type)
+    async def stop(self) -> None:
+        """Stop the event bus gracefully."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Event bus stopped")
 
-    def get_history(
-        self,
-        event_type: EventType | None = None,
-        limit: int = 100,
-    ) -> list[Event]:
-        events = self._history
-        if event_type:
-            events = [e for e in events if e.event_type == event_type]
-        return events[-limit:]
+    async def _consume(self) -> None:
+        """Main consumer loop — dispatches events to subscribers."""
+        while self._running:
+            try:
+                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            subscribers = self._subscribers.get(event.topic, [])
+            if not subscribers:
+                logger.debug("No subscribers for topic '%s'", event.topic)
+                continue
+
+            for callback in subscribers:
+                try:
+                    await callback(event.data)
+                except Exception:
+                    logger.exception(
+                        "Subscriber error on topic '%s'",
+                        event.topic,
+                    )
+
+    @property
+    def queue_depth(self) -> int:
+        """Current number of unprocessed events."""
+        return self._queue.qsize()
+
+    @property
+    def subscriber_count(self) -> dict[str, int]:
+        """Number of subscribers per topic."""
+        return {topic: len(subs) for topic, subs in self._subscribers.items()}
