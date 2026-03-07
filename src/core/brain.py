@@ -17,6 +17,7 @@ from src.core.autonomous import AutonomousDecisionEngine, DecisionOutcome
 from src.core.config import SentinelConfig
 from src.core.event_bus import Event, EventBus, EventType
 from src.core.playbook_engine import PlaybookEngine
+from src.core.plugin_manager import PluginManager
 from src.core.self_learning import SelfLearningSystem
 from src.core.threat_modeling import ThreatModeler
 
@@ -63,6 +64,9 @@ class SentinelBrain:
         self.playbook_engine = PlaybookEngine(event_bus)
         self.threat_modeler = ThreatModeler()
 
+        # Plugin manager for extensibility
+        self.plugin_manager = PluginManager(event_bus)
+
         # Track cycle metrics
         self._cycle_count = 0
         self._events_processed = 0
@@ -76,6 +80,88 @@ class SentinelBrain:
     def register_adapter(self, name: str, adapter: Any) -> None:
         self._adapters[name] = adapter
         logger.info("Registered adapter: %s", name)
+
+    def bootstrap_agents(self, agents_config: dict[str, Any] | None = None) -> None:
+        """Auto-register all built-in agents based on config.
+
+        Reads config/agents.yaml and registers each enabled agent.
+        Also loads any plugin agents from plugins/agents/.
+        """
+        from src.agents.triage_agent import TriageAgent
+        from src.agents.threat_hunter import ThreatHunterAgent
+        from src.agents.incident_responder import IncidentResponderAgent
+        from src.agents.compliance_auditor import ComplianceAuditorAgent
+        from src.agents.forensic_analyst import ForensicAnalystAgent
+        from src.agents.vuln_scanner import VulnScannerAgent
+        from src.agents.red_team_agent import RedTeamAgent
+        from src.agents.purple_team_agent import PurpleTeamAgent
+
+        agent_map: dict[str, type] = {
+            "triage": TriageAgent,
+            "threat_hunter": ThreatHunterAgent,
+            "incident_responder": IncidentResponderAgent,
+            "compliance_auditor": ComplianceAuditorAgent,
+            "forensic_analyst": ForensicAnalystAgent,
+            "vuln_scanner": VulnScannerAgent,
+            "red_team": RedTeamAgent,
+            "purple_team": PurpleTeamAgent,
+        }
+
+        cfg = agents_config or {}
+        for agent_name, agent_cls in agent_map.items():
+            agent_cfg = cfg.get(agent_name, {})
+            if isinstance(agent_cfg, dict) and not agent_cfg.get("enabled", True):
+                logger.info("Agent %s disabled in config, skipping", agent_name)
+                continue
+            agent = agent_cls(self.event_bus, agent_cfg if isinstance(agent_cfg, dict) else {})
+            self.register_agent(agent_name, agent)
+
+        # Discover plugin agents
+        self.plugin_manager.discover_agents("plugins/agents")
+        for name, cls in self.plugin_manager._agent_classes.items():
+            if name not in self._agents:
+                agent = cls(self.event_bus, cfg.get(name, {}))
+                self.register_agent(name, agent)
+
+    def load_plugins(self, plugins_config: dict[str, Any] | None = None) -> dict[str, int]:
+        """Load all extension plugins from configuration.
+
+        Call this after bootstrap_agents() to load technique packs,
+        STRIDE templates, and additional playbooks/sigma rules.
+        """
+        # Load plugins config
+        if plugins_config is None:
+            try:
+                import yaml
+                from pathlib import Path
+                plugins_path = Path("config/plugins.yaml")
+                if plugins_path.exists():
+                    with open(plugins_path) as f:
+                        data = yaml.safe_load(f)
+                    plugins_config = data.get("plugins", {}) if data else {}
+            except Exception:
+                logger.exception("Failed to load plugins config")
+                plugins_config = {}
+
+        results = self.plugin_manager.load_all(plugins_config or {})
+
+        # Inject custom techniques into red team agent
+        red_team = self._agents.get("red_team")
+        if red_team and self.plugin_manager._technique_packs:
+            from src.agents.red_team_agent import TECHNIQUE_LIBRARY
+            for pack in self.plugin_manager._technique_packs.values():
+                TECHNIQUE_LIBRARY.update(pack)
+            logger.info("Injected %d custom techniques into red team",
+                        sum(len(p) for p in self.plugin_manager._technique_packs.values()))
+
+        # Inject custom STRIDE templates into threat modeler
+        if self.plugin_manager._stride_templates:
+            from src.core.threat_modeling import STRIDE_TEMPLATES
+            STRIDE_TEMPLATES.update(self.plugin_manager._stride_templates)
+            logger.info("Injected %d custom STRIDE template sets",
+                        len(self.plugin_manager._stride_templates))
+
+        return results
 
     async def start(self) -> None:
         """Start the autonomous brain."""
@@ -371,5 +457,8 @@ class SentinelBrain:
         purple = self._agents.get("purple_team")
         if purple:
             status["coverage_score"] = purple.get_coverage_score()
+
+        # Plugin stats
+        status["plugins"] = self.plugin_manager.get_stats()
 
         return status

@@ -1,0 +1,22 @@
+# Example: Custom ATT&CK Technique Pack
+#
+# Add your own technique definitions here. They will be merged into the
+# Red Team agent's technique library and available for simulation.
+#
+# Copy this file and modify it for your environment.
+
+name: custom_techniques_example
+
+techniques:
+  # Example: Custom technique for your specific environment
+  # T1234.001:
+  #   name: "Custom Technique Name"
+  #   tactic: "execution"
+  #   description: "Description of the technique"
+  #   platforms: [windows, linux]
+  #   simulation_indicators:
+  #     event_type: "process_creation"
+  #     command_patterns: ["suspicious_cmd"]
+  #   detection_sources: [defender_xdr, qradar]
+  #
+  # Uncomment and customize the above to add your own techniques.

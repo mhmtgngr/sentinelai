@@ -1,0 +1,20 @@
+Drop custom agent Python files here.
+
+Each file should contain a class that extends BaseAgent:
+
+    from src.agents.base_agent import BaseAgent, AgentCapability, AgentResult
+    from src.core.event_bus import Event, EventBus
+
+    class MyCustomAgent(BaseAgent):
+        name = "my_custom_agent"
+        capability = AgentCapability.TRIAGE  # or any capability
+
+        async def process(self, event: Event) -> AgentResult:
+            # Your logic here
+            return AgentResult(agent_name=self.name, action="process", success=True)
+
+        async def run_autonomous(self) -> list[AgentResult]:
+            # Your autonomous checks here
+            return []
+
+The agent will be auto-discovered and available for registration in brain.py.

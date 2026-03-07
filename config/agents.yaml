@@ -62,3 +62,27 @@ agents:
       - VS-005  # Weak authentication
       - VS-006  # Misconfigured CORS
       - VS-007  # Exposed sensitive endpoints
+
+  red_team:
+    enabled: true
+    # Auto-run scheduled campaigns (requires human approval via decision engine)
+    auto_schedule: false
+    # Default target scope for simulations
+    default_scope:
+      target_ip: "10.0.0.0/24"
+      target_host: "LAB-WORKSTATION"
+    # Technique packs to load (from config/techniques/)
+    technique_pack_dirs:
+      - config/techniques
+
+  purple_team:
+    enabled: true
+    # How often to rebuild coverage matrix (in heartbeats)
+    coverage_frequency: 20
+    # Priority techniques to always test
+    priority_techniques:
+      - T1566.001  # Spearphishing Attachment
+      - T1059.001  # PowerShell
+      - T1078      # Valid Accounts
+      - T1003.001  # LSASS Memory
+      - T1486      # Ransomware

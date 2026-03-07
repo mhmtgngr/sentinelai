@@ -1,0 +1,33 @@
+# Example: Custom STRIDE Template for a new asset type
+#
+# Add STRIDE threat definitions for asset types not covered by the built-in
+# templates (server, workstation, user, network_device).
+#
+# Copy this file and customize for your environment.
+
+asset_type: database  # Must be unique — this becomes the lookup key
+
+threats: []
+  # Example threats for a database asset:
+  #
+  # - category: "information_disclosure"
+  #   title: "Database Data Breach"
+  #   description: "Unauthorized access to sensitive database records"
+  #   likelihood: 4
+  #   impact: 5
+  #   mitre_techniques: ["T1213"]
+  #   mitigations:
+  #     - "Encrypt data at rest (TDE)"
+  #     - "Row-level security"
+  #     - "Database activity monitoring"
+  #
+  # - category: "tampering"
+  #   title: "SQL Injection Attack"
+  #   description: "Attacker modifies database via SQL injection"
+  #   likelihood: 3
+  #   impact: 5
+  #   mitre_techniques: ["T1190"]
+  #   mitigations:
+  #     - "Parameterized queries"
+  #     - "WAF rules for SQLi"
+  #     - "Input validation"

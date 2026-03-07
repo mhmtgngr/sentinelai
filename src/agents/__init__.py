@@ -5,6 +5,8 @@ from src.agents.incident_responder import IncidentResponderAgent
 from src.agents.compliance_auditor import ComplianceAuditorAgent
 from src.agents.forensic_analyst import ForensicAnalystAgent
 from src.agents.vuln_scanner import VulnScannerAgent
+from src.agents.red_team_agent import RedTeamAgent
+from src.agents.purple_team_agent import PurpleTeamAgent
 
 __all__ = [
     "BaseAgent",
@@ -15,4 +17,6 @@ __all__ = [
     "ComplianceAuditorAgent",
     "ForensicAnalystAgent",
     "VulnScannerAgent",
+    "RedTeamAgent",
+    "PurpleTeamAgent",
 ]
