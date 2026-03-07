@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sentinel-ai"
+version = "0.1.0"
+description = "Autonomous AI Blue Team Security Operations Platform"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    "aiosmtplib>=3.0.0",
+    "jinja2>=3.1.0",
+    "chromadb>=0.4.0",
+    "pyyaml>=6.0",
+    "apscheduler>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.2.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,38 @@
+# Ransomware incident response playbook
+name: Ransomware Response
+description: Critical response to ransomware detection
+trigger:
+  category: ransomware
+  min_severity: high
+
+actions:
+  - type: isolate_endpoint
+    description: Immediately isolate the infected endpoint from the network
+    auto: true
+    priority: critical
+
+  - type: disable_account
+    description: Disable the affected user account
+    auto: true
+    priority: critical
+
+  - type: revoke_sessions
+    description: Revoke all active sessions for the affected user
+    auto: true
+
+  - type: scan_endpoint
+    description: Deep scan all endpoints in the same network segment
+    auto: false
+    requires_approval: true
+
+  - type: escalate
+    description: Escalate to incident response team
+    auto: true
+
+notifications:
+  teams: true
+  email: true
+  email_recipients:
+    - security-team@yourorg.com
+    - ciso@yourorg.com
+    - it-ops@yourorg.com

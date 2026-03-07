@@ -1,0 +1,43 @@
+# Agent configuration for SENTINEL-AI
+
+triage:
+  enabled: true
+  auto_classify: true
+  confidence_threshold: 0.7
+  severity_escalation: true
+
+soar:
+  enabled: true
+  auto_remediate_severity:
+    - low
+    - medium
+  require_approval_severity:
+    - high
+    - critical
+  max_concurrent_actions: 5
+
+education:
+  enabled: true
+  auto_send_for_severity:
+    - low
+    - medium
+  require_approval_for_severity:
+    - high
+    - critical
+  cooldown_hours: 72  # Don't re-educate same user on same topic within this window
+
+teams:
+  enabled: true
+  decision_timeout_minutes: 30
+  auto_escalate_on_timeout: true
+  notification_severity:
+    - medium
+    - high
+    - critical
+
+email:
+  enabled: true
+  alert_notification_severity:
+    - high
+    - critical
+  education_enabled: true
