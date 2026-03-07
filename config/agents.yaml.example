@@ -1,0 +1,58 @@
+# Sentinel-AI Agent Configuration
+# Copy to agents.yaml and tune for your environment.
+# See docs/agent-coordination.md for detailed parameter descriptions.
+
+agents:
+  triage:
+    enabled: true
+    timeout_seconds: 30
+    max_concurrent_tasks: 10
+    llm_model: "claude-haiku-4-5-20251001"
+    confidence_threshold: 0.75
+    retry_max: 3
+    checkpoint_enabled: false
+
+  threat_hunter:
+    enabled: true
+    timeout_seconds: 120
+    max_concurrent_tasks: 3
+    llm_model: "claude-sonnet-4-6"
+    confidence_threshold: 0.80
+    retry_max: 3
+    checkpoint_enabled: true
+
+  incident_responder:
+    enabled: true
+    timeout_seconds: 60
+    max_concurrent_tasks: 1
+    llm_model: "claude-sonnet-4-6"
+    confidence_threshold: 0.85
+    retry_max: 2
+    checkpoint_enabled: true
+
+  compliance_auditor:
+    enabled: true
+    timeout_seconds: 180
+    max_concurrent_tasks: 2
+    llm_model: "claude-haiku-4-5-20251001"
+    confidence_threshold: 0.70
+    retry_max: 3
+    checkpoint_enabled: false
+
+  forensic_analyst:
+    enabled: true
+    timeout_seconds: 300
+    max_concurrent_tasks: 2
+    llm_model: "claude-sonnet-4-6"
+    confidence_threshold: 0.75
+    retry_max: 2
+    checkpoint_enabled: true
+
+  vuln_scanner:
+    enabled: true
+    timeout_seconds: 600
+    max_concurrent_tasks: 1
+    llm_model: "claude-haiku-4-5-20251001"
+    confidence_threshold: 0.70
+    retry_max: 3
+    checkpoint_enabled: true

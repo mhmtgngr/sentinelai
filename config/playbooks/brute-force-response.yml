@@ -1,0 +1,85 @@
+name: Brute Force Response
+id: pb-brute-force-001
+description: Automated response playbook for brute force login attempts.
+version: "1.0"
+severity_threshold: HIGH
+mitre_techniques:
+  - T1110.001  # Brute Force: Password Guessing
+  - T1110.003  # Brute Force: Password Spraying
+
+triggers:
+  - alert_type: brute_force
+  - sigma_rule: 5710-ssh-brute-force
+
+steps:
+  - id: verify_source
+    name: Verify source IP reputation
+    agent: threat_hunter
+    action: enrich_ioc
+    params:
+      ioc_type: ip
+      check_threat_intel: true
+      check_allowlist: true
+    on_allowlist: skip_to_monitor
+
+  - id: block_source
+    name: Block source IP on firewall
+    agent: incident_responder
+    action: BLOCK_IP
+    params:
+      adapter_type: firewall
+      duration: 24h
+      reason: "Brute force attack detected - automated block"
+    requires:
+      confidence: 0.75
+      corroboration: true
+    rollback:
+      action: UNBLOCK_IP
+      auto_rollback_after: 24h
+
+  - id: reset_credentials
+    name: Force password reset for targeted accounts
+    agent: incident_responder
+    action: FORCE_PASSWORD_RESET
+    params:
+      adapter_type: identity
+      notify_user: true
+    requires:
+      confidence: 0.85
+      human_approval: false
+    condition: login_success_detected
+
+  - id: collect_evidence
+    name: Collect forensic evidence
+    agent: forensic_analyst
+    action: collect_evidence
+    params:
+      log_sources:
+        - siem
+        - edr
+      time_window: 1h
+      preserve_chain_of_custody: true
+
+  - id: monitor
+    name: Enhanced monitoring
+    agent: threat_hunter
+    action: enhanced_monitoring
+    params:
+      target_assets: affected_hosts
+      duration: 72h
+      alert_on: any_activity_from_source
+
+  - id: report
+    name: Generate incident report
+    agent: forensic_analyst
+    action: generate_report
+    params:
+      include_timeline: true
+      include_evidence: true
+      include_recommendations: true
+
+notifications:
+  on_start: "Brute force response playbook initiated for {source_ip} targeting {target_host}"
+  on_complete: "Brute force response complete. Source blocked, credentials reset, monitoring active."
+  on_failure: "Brute force response requires manual intervention: {failure_reason}"
+  channel: security_ops
