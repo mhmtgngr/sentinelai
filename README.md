@@ -235,6 +235,200 @@ python -m sentinel_ai.main --mode autonomous
 
 ---
 
+## POC Deployment Guide
+
+Step-by-step instructions for deploying Sentinel-AI as a proof of concept on a server.
+
+### Server Requirements
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| **OS** | Ubuntu 22.04+ / Debian 12+ / any Linux with Docker | Ubuntu 24.04 LTS |
+| **CPU** | 4 cores | 8 cores |
+| **RAM** | 8 GB | 16 GB |
+| **Disk** | 20 GB | 50 GB (log/vector storage grows over time) |
+| **Docker** | Docker Engine 24+ with Compose v2 | Latest stable |
+| **Python** | 3.11+ (for local dev/testing) | 3.12 |
+| **Network** | Outbound HTTPS (LLM API calls) | Static IP for adapter webhooks |
+
+### Step 1: Clone & Configure
+
+```bash
+git clone https://github.com/your-org/sentinel-ai.git
+cd sentinel-ai
+
+# Copy environment template and configure
+cp .env.example .env
+```
+
+Edit `.env` with your values — at minimum set:
+
+```bash
+# Required: LLM provider key
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Database (defaults work for Docker Compose)
+DATABASE_URL=postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel_ai
+
+# ChromaDB (defaults work for Docker Compose)
+CHROMADB_HOST=localhost
+CHROMADB_PORT=8100
+
+# Safety: start in shadow mode (observe only, no autonomous actions)
+SHADOW_MODE=true
+```
+
+### Step 2: Start Infrastructure
+
+Start PostgreSQL and ChromaDB first:
+
+```bash
+docker compose up -d postgresql chromadb
+```
+
+Wait for PostgreSQL to be ready:
+
+```bash
+docker compose logs -f postgresql
+# Wait for: "database system is ready to accept connections"
+# Press Ctrl+C to exit log tail
+```
+
+### Step 3: Start the Application
+
+**Option A — Docker (production-like):**
+
+```bash
+docker compose up -d sentinel-ai
+docker compose logs -f sentinel-ai   # Watch startup logs
+```
+
+**Option B — Local Python (development, easier debugging):**
+
+```bash
+# Install dependencies
+pip install fastapi uvicorn pydantic pydantic-settings pyyaml httpx
+
+# Start with auto-reload
+uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Step 4: Verify Health
+
+```bash
+# Liveness check — is the process running?
+curl http://localhost:8000/health
+# Expected: {"status":"healthy","version":"0.1.0"}
+
+# Readiness check — are dependencies connected?
+curl http://localhost:8000/ready
+# Expected: {"status":"ready","components":{"event_bus":"healthy"}}
+
+# Metrics — operational metrics
+curl http://localhost:8000/metrics
+# Expected: {"event_bus_queue_depth":0,"event_bus_subscribers":{}}
+```
+
+### Step 5: Test API Endpoints
+
+```bash
+# List alerts (empty initially)
+curl http://localhost:8000/api/v1/alerts
+# Expected: {"alerts":[],"total":0,"limit":50,"offset":0}
+
+# List incidents
+curl http://localhost:8000/api/v1/incidents
+
+# Check adapter health
+curl http://localhost:8000/api/v1/adapters/health
+
+# Trigger an investigation (simulates what an OpenClaw skill would call)
+curl -X POST http://localhost:8000/api/v1/investigations \
+  -H "Content-Type: application/json" \
+  -d '{"type":"hunt","target":"10.0.0.5","context":"Suspicious outbound traffic","priority":1}'
+# Expected: {"status":"queued","type":"hunt","target":"10.0.0.5"}
+
+# Check dead letter queue
+curl http://localhost:8000/api/v1/dlq
+# Expected: {"events":[],"total":0}
+```
+
+### Step 6: Run Tests
+
+```bash
+pip install pytest pytest-asyncio
+python -m pytest tests/ -v
+# Expected: 26 passed
+```
+
+### Step 7: Shadow Mode Verification
+
+The platform starts in **shadow mode** by default (`SHADOW_MODE=true`):
+- All pipelines run normally
+- Agent decisions are logged but **not executed** against real infrastructure
+- Recommended actions appear in API responses for analyst review
+- Monitor logs: `docker compose logs -f sentinel-ai`
+
+When ready for autonomous mode, set `SHADOW_MODE=false` in `.env` and restart.
+
+### Network & Firewall
+
+| Port | Service | Expose Externally? |
+|------|---------|-------------------|
+| 8000 | Sentinel-AI API | Management network only |
+| 5432 | PostgreSQL | **No** — internal only |
+| 8100 | ChromaDB | **No** — internal only |
+
+### Reverse Proxy (Optional)
+
+For HTTPS access, place nginx or Caddy in front of the API:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name sentinel.example.com;
+
+    ssl_certificate     /etc/ssl/certs/sentinel.pem;
+    ssl_certificate_key /etc/ssl/private/sentinel.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket support for real-time event stream
+    location /api/v1/ws/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+### Stopping & Cleanup
+
+```bash
+# Stop all containers (preserves data)
+docker compose down
+
+# Stop and delete all data (fresh start)
+docker compose down -v
+```
+
+### What's Next After POC
+
+1. **Connect a real adapter** — Configure a SIEM (Wazuh), firewall, or EDR in `config/adapters.yaml`
+2. **Implement an agent** — Extend `BaseAgent` to build the Triage Agent with LLM integration
+3. **Enable OpenClaw** — Install OpenClaw skills from `openclaw-skills/` for chat-driven operations
+4. **Disable shadow mode** — Once validated, set `SHADOW_MODE=false` for autonomous operation
+5. **Add observability** — Connect Prometheus + Grafana to the `/metrics` endpoint
+
+---
+
 ## Project Structure
 
 ```
