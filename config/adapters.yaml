@@ -1,0 +1,56 @@
+# Sentinel-AI Adapter Configuration
+# Your security stack: QRadar (on-prem), Microsoft E5, Palo Alto
+
+adapters:
+  # --- SIEM (on-prem) ---
+  - vendor: qradar
+    name: qradar_siem
+    endpoint: https://qradar.corp.local
+    api_token_env: QRADAR_API_TOKEN
+    api_version: "19.0"
+    verify_ssl: false
+
+  # --- Palo Alto Firewall ---
+  - vendor: paloalto
+    name: primary_firewall
+    endpoint: https://fw.corp.local/api
+    api_key_env: PALOALTO_API_KEY
+    verify_ssl: true
+
+  # --- Microsoft Entra ID (Identity Protection — E5) ---
+  - vendor: entra_id
+    name: entra_identity
+    tenant_id_env: ENTRA_TENANT_ID
+    client_id_env: ENTRA_CLIENT_ID
+    client_secret_env: ENTRA_CLIENT_SECRET
+
+  # --- Microsoft Defender for Endpoint / XDR ---
+  - vendor: defender_xdr
+    name: defender_edr
+    tenant_id_env: DEFENDER_TENANT_ID
+    client_id_env: DEFENDER_CLIENT_ID
+    client_secret_env: DEFENDER_CLIENT_SECRET
+
+  # --- Exchange Online / Defender for Office 365 ---
+  - vendor: exchange_online
+    name: exchange_security
+    tenant_id_env: MS_TENANT_ID
+    client_id_env: MS_CLIENT_ID
+    client_secret_env: MS_CLIENT_SECRET
+
+  # --- Microsoft Teams (notifications + DLP monitoring) ---
+  - vendor: teams
+    name: teams_notifications
+    tenant_id_env: MS_TENANT_ID
+    client_id_env: MS_CLIENT_ID
+    client_secret_env: MS_CLIENT_SECRET
+    webhook_url_env: TEAMS_WEBHOOK_URL
+    # alert_team_id: YOUR_TEAM_ID
+    # alert_channel_id: YOUR_CHANNEL_ID
+
+  # --- Microsoft Security Center (unified alerts + Secure Score) ---
+  - vendor: security_center
+    name: m365_security_center
+    tenant_id_env: MS_TENANT_ID
+    client_id_env: MS_CLIENT_ID
+    client_secret_env: MS_CLIENT_SECRET

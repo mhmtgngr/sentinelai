@@ -1,0 +1,52 @@
+# Playbook: Isolate Compromised Host
+name: isolate_compromised_host
+description: Network-isolates a potentially compromised host for forensic investigation
+trigger:
+  event_type: threat.detected
+  conditions:
+    severity:
+      - critical
+    attack_type:
+      - malware
+      - lateral_movement
+      - privilege_escalation
+
+requires_approval: true
+
+steps:
+  - name: Collect pre-isolation evidence
+    action: collect_forensics
+    params:
+      target_field: hostname
+      evidence_types:
+        - running_processes
+        - network_connections
+        - loaded_modules
+
+  - name: Isolate host via EDR
+    action: isolate_host
+    adapter_type: edr
+    params:
+      host_field: hostname
+      reason: "Sentinel-AI: {{ attack_type }} detected - forensic isolation"
+
+  - name: Revoke user sessions
+    action: revoke_sessions
+    adapter_type: identity
+    params:
+      user_field: user
+      reason: "Associated with compromised host {{ hostname }}"
+
+  - name: Create forensic case
+    action: create_case
+    params:
+      title: "Compromised Host Investigation: {{ hostname }}"
+      severity: critical
+      description: "Host {{ hostname }} isolated due to {{ attack_type }}. Automated evidence collection initiated."
+
+  - name: Notify incident response team
+    action: notify
+    params:
+      channel: slack
+      priority: critical
+      message: "CRITICAL: Host {{ hostname }} has been isolated. Attack type: {{ attack_type }}. Forensic case created."

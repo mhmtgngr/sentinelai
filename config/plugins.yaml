@@ -1,0 +1,33 @@
+# Sentinel-AI Plugin Configuration
+#
+# Extend the platform by adding custom agents, adapters, techniques, and more.
+# Drop files into the configured directories and they'll be auto-discovered.
+
+plugins:
+  # Custom agent classes (Python files extending BaseAgent)
+  # Place .py files here with classes that extend src.agents.base_agent.BaseAgent
+  agent_dirs:
+    - plugins/agents
+
+  # Custom adapter classes (Python files extending BaseSecurityAdapter)
+  # Place .py files here with classes that extend src.integrations.base_adapter.BaseSecurityAdapter
+  adapter_dirs:
+    - plugins/adapters
+
+  # MITRE ATT&CK technique packs (YAML files)
+  # Add custom techniques for red team simulation
+  technique_packs:
+    - config/techniques
+
+  # STRIDE threat model templates (YAML files)
+  # Add custom threat templates for additional asset types
+  stride_templates:
+    - config/stride
+
+  # Additional playbook directories (YAML files)
+  # Playbooks in config/playbooks/ are always loaded; add more dirs here
+  playbook_dirs: []
+
+  # Additional Sigma rule directories (YAML files)
+  # Rules in config/sigma_rules/ are always loaded; add more dirs here
+  sigma_dirs: []

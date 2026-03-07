@@ -1,0 +1,18 @@
+title: Multiple Failed Login Attempts (Brute Force)
+id: sentinel-bf-001
+status: stable
+level: high
+description: Detects multiple failed authentication attempts from a single source IP
+logsource:
+  category: authentication
+  product: any
+detection:
+  selection:
+    event_type: "authentication_failure"
+  condition: selection
+tags:
+  - attack.credential_access
+  - attack.t1110
+falsepositives:
+  - Automated testing
+  - Password rotation scripts

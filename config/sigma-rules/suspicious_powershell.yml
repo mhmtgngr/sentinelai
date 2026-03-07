@@ -1,0 +1,30 @@
+title: Suspicious PowerShell Execution
+id: sentinel-ps-001
+status: stable
+level: high
+description: Detects encoded PowerShell commands and suspicious execution patterns
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_encoded:
+    command_line|contains:
+      - "-enc"
+      - "-encodedcommand"
+      - "frombase64string"
+  selection_download:
+    command_line|contains:
+      - "downloadstring"
+      - "downloadfile"
+      - "invoke-webrequest"
+      - "wget"
+      - "curl"
+  condition: selection_encoded or selection_download
+tags:
+  - attack.execution
+  - attack.t1059.001
+  - attack.defense_evasion
+  - attack.t1027
+falsepositives:
+  - Legitimate admin scripts
+  - Configuration management tools

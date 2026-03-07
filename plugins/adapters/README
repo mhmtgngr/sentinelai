@@ -1,0 +1,22 @@
+Drop custom adapter Python files here.
+
+Each file should contain a class that extends BaseSecurityAdapter:
+
+    from src.integrations.base_adapter import BaseSecurityAdapter, SecurityEvent
+
+    class MyCustomAdapter(BaseSecurityAdapter):
+        vendor = "my_vendor"
+        product_type = "siem"
+
+        async def _authenticate(self) -> bool:
+            # Your auth logic
+            return True
+
+        async def get_events(self) -> list[dict]:
+            # Pull events from your security product
+            return []
+
+        async def health_check(self) -> dict:
+            return {"status": "healthy"}
+
+The adapter will be auto-discovered and available in the adapter registry.

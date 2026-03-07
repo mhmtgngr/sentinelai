@@ -1,0 +1,19 @@
+title: Potential Data Exfiltration via DNS
+id: sentinel-exfil-001
+status: experimental
+level: critical
+description: Detects potential DNS tunneling for data exfiltration based on unusual DNS query patterns
+logsource:
+  category: dns
+  product: any
+detection:
+  selection:
+    event_type: "dns_query"
+    query_length|gt: 50
+  condition: selection
+tags:
+  - attack.exfiltration
+  - attack.t1048.003
+falsepositives:
+  - CDN lookups
+  - Legitimate long DNS names
