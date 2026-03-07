@@ -8,7 +8,7 @@ from fastapi import FastAPI
 
 from src.core.config import settings
 from src.core.orchestrator import get_orchestrator
-from src.api.routes import alerts, teams_webhook, education, health
+from src.api.routes import alerts, teams_webhook, education, health, dashboard
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -26,6 +26,7 @@ app.include_router(health.router, prefix="/api/v1")
 app.include_router(alerts.router, prefix="/api/v1")
 app.include_router(teams_webhook.router, prefix="/api/v1")
 app.include_router(education.router, prefix="/api/v1")
+app.include_router(dashboard.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
