@@ -1,0 +1,32 @@
+# Brute force attack response playbook
+name: Brute Force Response
+description: Automated response to brute force / credential stuffing attacks
+trigger:
+  category: brute_force
+  min_severity: medium
+
+actions:
+  - type: block_ip
+    description: Block the source IP on the firewall
+    auto: true
+
+  - type: enforce_mfa
+    description: Enable MFA for the targeted account
+    auto: true
+
+  - type: reset_password
+    description: Force password reset for the targeted account
+    auto: false
+    requires_approval: true
+
+  - type: educate_user
+    description: Send password security training
+    auto: true
+    topics:
+      - strong_password_practices
+      - multi_factor_authentication
+      - account_security
+
+notifications:
+  teams: true
+  email: true
