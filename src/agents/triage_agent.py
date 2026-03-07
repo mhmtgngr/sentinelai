@@ -1,238 +1,188 @@
-"""Autonomous triage agent that classifies, prioritizes, and routes alerts."""
+"""Triage Agent — Alert classification and prioritization.
+
+First agent in the reactive pipeline. Classifies incoming alerts,
+assigns severity, deduplicates, and routes to appropriate next agent.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timezone
+from typing import Any
 
-from src.core.config import settings, Severity as CfgSeverity
-from src.core.event_bus import (
-    event_bus,
-    ALERT_RECEIVED,
-    ALERT_TRIAGED,
-    DECISION_NEEDED,
-)
-from src.core.models import (
-    Alert,
-    AlertCategory,
-    AlertStatus,
-    Severity,
-    TriageResult,
-)
+from src.agents.base_agent import BaseAgent
+from src.core.models import AgentDecision, Alert, Severity, Verdict
+from src.memory.threat_intel import ThreatIntelCache
+from src.memory.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
-# ── Keyword-based classification rules ──
-CATEGORY_KEYWORDS: dict[AlertCategory, list[str]] = {
-    AlertCategory.PHISHING: [
-        "phish", "spoof", "credential harvest", "suspicious link", "impersonat",
-        "social engineering", "deceptive email",
-    ],
-    AlertCategory.MALWARE: [
-        "malware", "trojan", "virus", "worm", "ransomware", "payload",
-        "malicious file", "dropper",
-    ],
-    AlertCategory.BRUTE_FORCE: [
-        "brute force", "failed login", "password spray", "credential stuffing",
-        "multiple failed", "login attempt",
-    ],
-    AlertCategory.DATA_EXFILTRATION: [
-        "exfiltration", "data leak", "large upload", "unusual transfer",
-        "sensitive data", "dlp",
-    ],
-    AlertCategory.UNAUTHORIZED_ACCESS: [
-        "unauthorized", "privilege escalation", "admin access", "elevation",
-        "bypass", "illegal access",
-    ],
-    AlertCategory.POLICY_VIOLATION: [
-        "policy violation", "compliance", "prohibited", "unapproved software",
-        "shadow it",
-    ],
-    AlertCategory.INSIDER_THREAT: [
-        "insider", "unusual hours", "abnormal behavior", "terminated employee",
-    ],
-    AlertCategory.RANSOMWARE: [
-        "ransomware", "encrypt", "ransom note", "file extension change",
-    ],
-    AlertCategory.LATERAL_MOVEMENT: [
-        "lateral", "psexec", "wmi remote", "rdp brute", "pass the hash",
-    ],
-    AlertCategory.CREDENTIAL_COMPROMISE: [
-        "credential leak", "password exposed", "dark web", "compromised account",
-        "token theft",
-    ],
-    AlertCategory.VULNERABILITY: [
-        "cve-", "vulnerability", "exploit", "unpatched", "zero-day",
-    ],
-}
+TRIAGE_SYSTEM_PROMPT = """You are a security triage analyst. Analyze the following security event and provide a classification.
 
-# Severity escalation rules
-SEVERITY_ESCALATION: dict[AlertCategory, Severity] = {
-    AlertCategory.RANSOMWARE: Severity.CRITICAL,
-    AlertCategory.DATA_EXFILTRATION: Severity.HIGH,
-    AlertCategory.CREDENTIAL_COMPROMISE: Severity.HIGH,
-    AlertCategory.LATERAL_MOVEMENT: Severity.HIGH,
-}
-
-# Categories that typically need user education
-EDUCATION_CATEGORIES: set[AlertCategory] = {
-    AlertCategory.PHISHING,
-    AlertCategory.MALWARE,
-    AlertCategory.POLICY_VIOLATION,
-    AlertCategory.CREDENTIAL_COMPROMISE,
-    AlertCategory.BRUTE_FORCE,
-}
-
-# Map categories to recommended SOAR actions
-CATEGORY_ACTIONS: dict[AlertCategory, list[str]] = {
-    AlertCategory.PHISHING: ["block_sender", "quarantine_email", "educate_user", "reset_password"],
-    AlertCategory.MALWARE: ["isolate_endpoint", "quarantine_file", "scan_endpoint"],
-    AlertCategory.BRUTE_FORCE: ["block_ip", "enforce_mfa", "educate_user"],
-    AlertCategory.DATA_EXFILTRATION: ["block_transfer", "disable_account", "escalate"],
-    AlertCategory.UNAUTHORIZED_ACCESS: ["disable_account", "revoke_sessions", "escalate"],
-    AlertCategory.RANSOMWARE: ["isolate_endpoint", "disable_account", "escalate"],
-    AlertCategory.LATERAL_MOVEMENT: ["isolate_endpoint", "block_ip", "escalate"],
-    AlertCategory.CREDENTIAL_COMPROMISE: ["reset_password", "revoke_sessions", "educate_user"],
-    AlertCategory.POLICY_VIOLATION: ["notify_manager", "educate_user"],
-    AlertCategory.INSIDER_THREAT: ["monitor_user", "escalate"],
-    AlertCategory.VULNERABILITY: ["patch_system", "isolate_endpoint"],
-    AlertCategory.SUSPICIOUS_ACTIVITY: ["investigate", "monitor"],
-}
+Respond in JSON format with these fields:
+- verdict: one of TRUE_POSITIVE, FALSE_POSITIVE, BENIGN, UNDETERMINED
+- confidence: float 0.0-1.0
+- severity: one of CRITICAL, HIGH, MEDIUM, LOW, INFO
+- mitre_tactic: the primary MITRE ATT&CK tactic (e.g., "Initial Access", "Credential Access")
+- reasoning: list of strings explaining your analysis
+- recommended_actions: list of action objects with "type" and "target" fields
+- escalate_to: which agent should handle next (threat_hunter, incident_responder, or none)
+"""
 
 
-class TriageAgent:
-    """Autonomous alert triage — classifies, adjusts severity, recommends actions."""
+class TriageAgent(BaseAgent):
+    """Alert triage and prioritization agent.
 
-    def __init__(self) -> None:
-        event_bus.subscribe(ALERT_RECEIVED, self.handle_alert)
+    Classifies incoming security events using:
+    1. Vector similarity search for historical context
+    2. Threat intelligence enrichment
+    3. LLM-based classification
+    """
 
-    def classify(self, alert: Alert) -> AlertCategory:
-        """Classify an alert into a category based on keyword matching."""
-        text = f"{alert.title} {alert.description}".lower()
-        scores: dict[AlertCategory, int] = {}
-        for category, keywords in CATEGORY_KEYWORDS.items():
-            score = sum(1 for kw in keywords if kw in text)
-            if score > 0:
-                scores[category] = score
-        if scores:
-            return max(scores, key=scores.get)  # type: ignore[arg-type]
-        return alert.category
+    def __init__(
+        self,
+        vector_store: VectorStore | None = None,
+        threat_intel: ThreatIntelCache | None = None,
+        llm_client: Any = None,
+        llm_model: str = "claude-haiku-4-5-20251001",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(agent_id="triage", timeout_seconds=30, **kwargs)
+        self._vector_store = vector_store
+        self._threat_intel = threat_intel
+        self._llm_client = llm_client
+        self._llm_model = llm_model
 
-    def adjust_severity(self, alert: Alert, category: AlertCategory) -> Severity:
-        """Escalate severity based on category or context signals."""
-        base = alert.severity
-        escalated = SEVERITY_ESCALATION.get(category)
-        if escalated and self._severity_rank(escalated) > self._severity_rank(base):
-            logger.info(
-                "Escalating alert %s severity %s -> %s (category: %s)",
-                alert.id, base.value, escalated.value, category.value,
-            )
-            return escalated
-        return base
+    @property
+    def capabilities(self) -> list[str]:
+        return ["triage", "classify", "deduplicate"]
 
-    def triage(self, alert: Alert) -> TriageResult:
-        """Full triage pipeline: classify -> adjust severity -> recommend actions."""
-        category = self.classify(alert)
-        adjusted_severity = self.adjust_severity(alert, category)
-        actions = CATEGORY_ACTIONS.get(category, ["investigate"])
-        education_needed = (
-            category in EDUCATION_CATEGORIES and alert.affected_user is not None
-        )
-        education_topics = self._get_education_topics(category) if education_needed else []
+    async def process(self, alert: Alert) -> AgentDecision:
+        """Classify and prioritize an alert."""
+        similar_events = await self._get_similar_events(alert)
+        intel_enrichment = await self._enrich_iocs(alert)
+        prompt = self._build_triage_prompt(alert, similar_events, intel_enrichment)
 
-        # Determine if human decision is required
-        severity_threshold = CfgSeverity(
-            settings.require_teams_approval_severity.value
-        )
-        requires_human = (
-            self._severity_rank(adjusted_severity)
-            >= self._severity_rank(Severity(severity_threshold.value))
-        )
-        if not settings.autonomous_mode:
-            requires_human = True
+        if self._llm_client is not None:
+            response = await self._call_llm(prompt)
+            return self._parse_triage_response(alert, response)
 
-        return TriageResult(
-            alert_id=alert.id,
-            original_severity=alert.severity,
-            adjusted_severity=adjusted_severity,
-            category=category,
-            confidence=0.85,
-            summary=self._build_summary(alert, category, adjusted_severity),
-            recommended_actions=actions,
-            requires_human_decision=requires_human,
-            auto_remediation_possible=settings.auto_remediate and not requires_human,
-            education_needed=education_needed,
-            education_topics=education_topics,
-        )
+        return self._rule_based_triage(alert, intel_enrichment)
 
-    async def handle_alert(self, data: dict) -> None:
-        """Event handler: triage an incoming alert and publish results."""
-        alert = Alert(**data["alert"])
-        logger.info("Triaging alert %s: %s", alert.id, alert.title)
+    async def _get_similar_events(self, alert: Alert) -> list[dict[str, Any]]:
+        """Query vector store for similar past events."""
+        if self._vector_store is None or not alert.events:
+            return []
 
-        result = self.triage(alert)
+        event = alert.events[0]
+        query = f"{event.event_type} {event.severity.value} {' '.join(ioc.value for ioc in event.iocs)}"
+        return await self._vector_store.search_similar(query, n_results=5)
 
-        alert.status = AlertStatus.TRIAGED
-        alert.category = result.category
-        alert.severity = result.adjusted_severity
-        alert.recommended_actions = result.recommended_actions
+    async def _enrich_iocs(self, alert: Alert) -> list[dict[str, Any]]:
+        """Enrich IOCs with threat intelligence."""
+        if self._threat_intel is None:
+            return []
 
-        await event_bus.publish(ALERT_TRIAGED, {
-            "alert": alert.model_dump(mode="json"),
-            "triage": result.model_dump(mode="json"),
-        })
+        enrichments = []
+        for event in alert.events:
+            for ioc in event.iocs:
+                enrichment = await self._threat_intel.enrich_ioc(ioc)
+                enrichments.append(enrichment)
+        return enrichments
 
-        if result.requires_human_decision:
-            await event_bus.publish(DECISION_NEEDED, {
-                "alert": alert.model_dump(mode="json"),
-                "triage": result.model_dump(mode="json"),
-            })
-
-    def _build_summary(
-        self, alert: Alert, category: AlertCategory, severity: Severity
+    def _build_triage_prompt(
+        self,
+        alert: Alert,
+        similar_events: list[dict[str, Any]],
+        intel: list[dict[str, Any]],
     ) -> str:
-        parts = [
-            f"[{severity.value.upper()}] {category.value.replace('_', ' ').title()}",
-            f"detected from {alert.source or 'unknown source'}.",
-        ]
-        if alert.affected_user:
-            parts.append(f"Affected user: {alert.affected_user}.")
-        if alert.affected_endpoint:
-            parts.append(f"Endpoint: {alert.affected_endpoint}.")
-        if alert.affected_ip:
-            parts.append(f"Source IP: {alert.affected_ip}.")
-        return " ".join(parts)
+        """Build LLM prompt for triage classification."""
+        parts = [TRIAGE_SYSTEM_PROMPT, "\n## Alert Data\n"]
 
-    def _get_education_topics(self, category: AlertCategory) -> list[str]:
-        mapping = {
-            AlertCategory.PHISHING: [
-                "recognizing_phishing_emails",
-                "safe_link_practices",
-                "reporting_suspicious_emails",
-            ],
-            AlertCategory.MALWARE: [
-                "safe_download_practices",
-                "recognizing_malicious_attachments",
-                "endpoint_security_basics",
-            ],
-            AlertCategory.BRUTE_FORCE: [
-                "strong_password_practices",
-                "multi_factor_authentication",
-                "account_security",
-            ],
-            AlertCategory.POLICY_VIOLATION: [
-                "acceptable_use_policy",
-                "data_handling_guidelines",
-                "compliance_requirements",
-            ],
-            AlertCategory.CREDENTIAL_COMPROMISE: [
-                "password_hygiene",
-                "credential_reuse_risks",
-                "multi_factor_authentication",
-            ],
+        for event in alert.events[:5]:
+            parts.append(f"- Source: {event.source_adapter}, Type: {event.event_type}")
+            parts.append(f"  Severity: {event.severity.value}, MITRE: {event.mitre_attack}")
+            parts.append(f"  Assets: {event.affected_assets}")
+            parts.append(f"  IOCs: {[{'type': i.type, 'value': i.value} for i in event.iocs]}")
+
+        if similar_events:
+            parts.append("\n## Similar Past Events\n")
+            for se in similar_events[:3]:
+                parts.append(f"- {se.get('document', 'N/A')}")
+
+        if intel:
+            parts.append("\n## Threat Intelligence\n")
+            for ie in intel[:5]:
+                parts.append(f"- {ie.get('ioc_value', 'N/A')}: reputation={ie.get('reputation', 'unknown')}")
+
+        return "\n".join(parts)
+
+    async def _call_llm(self, prompt: str) -> str:
+        """Call the LLM for classification."""
+        response = await self._llm_client.messages.create(
+            model=self._llm_model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
+    def _parse_triage_response(self, alert: Alert, response: str) -> AgentDecision:
+        """Parse LLM response into AgentDecision."""
+        try:
+            # Extract JSON from response (handle markdown code blocks)
+            text = response.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+
+            data = json.loads(text)
+
+            return AgentDecision(
+                agent_id=self.agent_id,
+                alert_id=alert.id,
+                confidence=min(max(float(data.get("confidence", 0.5)), 0.0), 1.0),
+                reasoning_trace=data.get("reasoning", ["LLM classification"]),
+                recommended_actions=data.get("recommended_actions", []),
+                data_sources_consulted=["vector_store", "threat_intel", "llm"],
+                dissenting_signals=[],
+            )
+        except (json.JSONDecodeError, KeyError, IndexError):
+            logger.warning("Failed to parse LLM triage response, falling back to rule-based")
+            return self._rule_based_triage(alert, [])
+
+    def _rule_based_triage(self, alert: Alert, intel: list[dict[str, Any]]) -> AgentDecision:
+        """Fallback rule-based triage when LLM is unavailable."""
+        severity_scores = {
+            Severity.CRITICAL: 0.95,
+            Severity.HIGH: 0.80,
+            Severity.MEDIUM: 0.60,
+            Severity.LOW: 0.40,
+            Severity.INFO: 0.20,
         }
-        return mapping.get(category, ["general_security_awareness"])
 
-    @staticmethod
-    def _severity_rank(sev: Severity) -> int:
-        return {"low": 0, "medium": 1, "high": 2, "critical": 3}[sev.value]
+        max_severity = Severity.INFO
+        for event in alert.events:
+            if list(Severity).index(event.severity) < list(Severity).index(max_severity):
+                max_severity = event.severity
+
+        confidence = severity_scores.get(max_severity, 0.5)
+
+        has_malicious_intel = any(
+            ie.get("reputation") == "malicious" for ie in intel
+        )
+        if has_malicious_intel:
+            confidence = min(confidence + 0.15, 1.0)
+
+        return AgentDecision(
+            agent_id=self.agent_id,
+            alert_id=alert.id,
+            confidence=confidence,
+            reasoning_trace=[
+                f"Rule-based triage (LLM unavailable)",
+                f"Max severity: {max_severity.value}",
+                f"Malicious intel match: {has_malicious_intel}",
+            ],
+            recommended_actions=[],
+            data_sources_consulted=["sigma_rules", "threat_intel"],
+        )

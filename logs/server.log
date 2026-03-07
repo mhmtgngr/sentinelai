@@ -1,0 +1,29 @@
+INFO:     Started server process [960624]
+INFO:     Waiting for application startup.
+2026-03-06 18:22:23 [info     ] sentinel_api_starting
+2026-03-06 18:22:24 [error    ] vector_memory_init_error       component=vector_memory error='404 page not found\n'
+2026-03-06 18:22:24 [info     ] adapter_registered             adapter_id=fw_paloalto_primary product_type=firewall vendor=paloalto
+2026-03-06 18:22:24 [info     ] adapter_registered             adapter_id=fw_fortinet_branch product_type=firewall vendor=fortinet
+2026-03-06 18:22:24 [info     ] adapter_registered             adapter_id=fw_pfsense_lab product_type=firewall vendor=pfsense
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.waf_adapter'" vendor=cloudflare
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.waf_adapter'" vendor=aws_waf
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.siem_adapter'" vendor=wazuh
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.siem_adapter'" vendor=elastic
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.siem_adapter'" vendor=splunk
+2026-03-06 18:22:24 [info     ] adapter_registered             adapter_id=idp_entraid product_type=identity vendor=entraid
+2026-03-06 18:22:24 [info     ] adapter_registered             adapter_id=idp_okta product_type=identity vendor=okta
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.edr_adapter'" vendor=crowdstrike
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.edr_adapter'" vendor=sentinelone
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.soar_adapter'" vendor=shuffle
+2026-03-06 18:22:24 [error    ] adapter_load_failed            error="No module named 'src.integrations.soar_adapter'" vendor=tracecat
+2026-03-06 18:22:24 [warning  ] unknown_adapter_vendor         vendor=virustotal
+2026-03-06 18:22:24 [warning  ] unknown_adapter_vendor         vendor=abuseipdb
+2026-03-06 18:22:24 [info     ] health_monitor_started         interval=60
+2026-03-06 18:22:24 [info     ] sentinel_api_ready             adapters=5
+INFO:     Application startup complete.
+ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0'INFO:     127.0.0.1:46648 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45118 - "GET /api/v1/status HTTP/1.1" 200 OK
+own              adapter_count=5
+2026-03-06 18:22:24 [info     ] vector_memory_closed           component=vector_memory
+2026-03-06 18:22:24 [info     ] sentinel_api_stopped
+INFO:     Application shutdown complete.

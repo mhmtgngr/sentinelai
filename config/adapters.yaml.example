@@ -1,0 +1,47 @@
+# Sentinel-AI Adapter Configuration
+# Copy to adapters.yaml and fill in your security product details.
+
+adapters:
+  # Firewall
+  - id: paloalto_main
+    type: firewall
+    vendor: paloalto
+    endpoint: https://fw.corp.local/api
+    auth:
+      type: api_key
+      key_env: PALOALTO_API_KEY
+    polling_interval_seconds: 30
+
+  # SIEM
+  - id: wazuh_main
+    type: siem
+    vendor: wazuh
+    endpoint: https://wazuh.corp.local:55000
+    auth:
+      type: basic
+      username_env: WAZUH_USERNAME
+      password_env: WAZUH_PASSWORD
+    polling_interval_seconds: 15
+
+  # EDR
+  - id: crowdstrike_main
+    type: edr
+    vendor: crowdstrike
+    endpoint: https://api.crowdstrike.com
+    auth:
+      type: oauth2
+      client_id_env: CROWDSTRIKE_CLIENT_ID
+      client_secret_env: CROWDSTRIKE_CLIENT_SECRET
+    polling_interval_seconds: 30
+
+  # Identity
+  - id: entraid_main
+    type: identity
+    vendor: entraid
+    endpoint: https://graph.microsoft.com
+    auth:
+      type: oauth2
+      tenant_id_env: ENTRAID_TENANT_ID
+      client_id_env: ENTRAID_CLIENT_ID
+      client_secret_env: ENTRAID_CLIENT_SECRET
+    polling_interval_seconds: 60
