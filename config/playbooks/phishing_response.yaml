@@ -1,0 +1,41 @@
+# Phishing incident response playbook
+name: Phishing Response
+description: Automated response to phishing alerts
+trigger:
+  category: phishing
+  min_severity: medium
+
+actions:
+  - type: quarantine_email
+    description: Quarantine the phishing email from all mailboxes
+    auto: true
+
+  - type: block_sender
+    description: Block the sender domain/address
+    auto: true
+
+  - type: reset_password
+    description: Force password reset if user clicked the link
+    auto: false
+    requires_approval: true
+    condition: user_clicked_link
+
+  - type: educate_user
+    description: Send phishing awareness training to affected user
+    auto: true
+    topics:
+      - recognizing_phishing_emails
+      - safe_link_practices
+      - reporting_suspicious_emails
+
+  - type: scan_endpoint
+    description: Run endpoint scan if user downloaded an attachment
+    auto: false
+    requires_approval: true
+    condition: attachment_downloaded
+
+notifications:
+  teams: true
+  email: true
+  email_recipients:
+    - security-team@yourorg.com
